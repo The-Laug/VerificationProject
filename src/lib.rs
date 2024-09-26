@@ -67,15 +67,35 @@ impl slang_ui::Hook for App {
 fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
     match &cmd.kind {
         CmdKind::Assert { condition, .. } => Ok(IVLCmd::assert(condition, "Assert might fail!")),
+        // Assume has not been documented in the report yet
+        // Assume just takes the High level command Assume and passes the condition onto the assume IVL command
+        // For the statement "assume true" the condition is "true" | for the statement "assume x == 2" the condition is "x == 2"
+        CmdKind::Assume { condition, .. } => Ok(IVLCmd::assume(condition)), 
+        // Seq has not been documented in the report yet
+        // Seq takes 2 commands in the higher level language (CmdKind) and passes them unto the IVLCmd seq
+        // Note: the commands have to be processed as well, so that the IVL command seq does not pass on higer level commands
+        CmdKind::Seq(command1, command2) => Ok(IVLCmd::seq(
+            &cmd_to_ivlcmd(command1)?,
+            &cmd_to_ivlcmd(command2)?,
+        )),
         _ => todo!("Not supported (yet)."),
     }
 }
 
-// Weakest precondition of (assert-only) IVL programs comprised of a single
-// assertion
-fn wp(ivl: &IVLCmd, _: &Expr) -> Result<(Expr, String)> {
+// Weakest precondition of (assert-only) IVL programs comprised of a single assertion
+fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
     match &ivl.kind {
         IVLCmdKind::Assert { condition, message } => Ok((condition.clone(), message.clone())),
+        // Assume has not been documented in the report yet
+        // Here the wp of assume with the condition, C, takes the postcondition, G, and returns the weakest precondition:
+        // I.e. : wp[assume C](G) = C -> G
+        IVLCmdKind::Assume { condition } => Ok((condition.clone().imp(postcon), "HERE".to_string())),
+        // Seq has not been documented in the report yet
+        // Here the wp of assume with the commands: command1 and command2 and the postcondition G returns the weakest precondition:  
+        // I.e. : wp[command1;command2](G) = wp[command1]( wp[command2](G) )
+        IVLCmdKind::Seq(command1, command2) => {
+            Ok((wp(command1, &wp(command2, postcon)?.0)?.0, "SEQ".to_string()))
+        }
         _ => todo!("Not supported (yet)."),
     }
 }
