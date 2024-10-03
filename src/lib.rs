@@ -1,6 +1,7 @@
 pub mod ivl;
 mod ivl_ext;
-
+use std::sync::{Mutex, Arc};
+use std::thread;
 use ivl::{IVLCmd, IVLCmdKind};
 use slang::ast::{Cmd, CmdKind, Expr};
 use slang_ui::prelude::*;
@@ -78,9 +79,39 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
             &cmd_to_ivlcmd(command1)?,
             &cmd_to_ivlcmd(command2)?,
         )),
+        CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
         _ => todo!("Not supported (yet)."),
     }
 }
+
+static GLOBAL_COUNTER: Mutex<u32> = Mutex::new(0);
+
+fn increment_counter() {
+    let mut counter = GLOBAL_COUNTER.lock().unwrap();
+    *counter += 1;
+}
+
+fn get_counter() -> u32 {
+    return *GLOBAL_COUNTER.lock().unwrap()
+}
+
+// Code to substitute variables in an expressions, to make the IVL commands into DSA
+// fn sub_new_var(expr:Expr) -> Result<Expr>{
+//     match &expr {
+//         Expr::ExprKind::Infix::add{e1,e2} => Ok(Expr::error()),
+//         _ => todo!("Not supported (yet)."),
+//     }
+// }
+
+// Code to make IVL commands to DSA form (Dynamic Single Assignment)
+// MAYBE NOT IVLCmdKind but just IVLCmd
+// fn ivl_to_dsa(ivl: &IVLCmd) -> Result<IVLCmdKind>{
+//     match &ivl.kind {
+//         IVLCmdKind::Assignment { name, expr } => Ok(IVLCmdKind::Assignment { name: (), expr: () }),
+//         _ => todo!("Not supported (yet)."),
+//     }
+
+// }
 
 // Weakest precondition of (assert-only) IVL programs comprised of a single assertion
 fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
@@ -95,6 +126,9 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
         // I.e. : wp[command1;command2](G) = wp[command1]( wp[command2](G) )
         IVLCmdKind::Seq(command1, command2) => {
             Ok((wp(command1, &wp(command2, postcon)?.0)?.0, "SEQ".to_string()))
+        },
+        IVLCmdKind::Assignment { name, expr } => {
+            Ok()
         }
         _ => todo!("Not supported (yet)."),
     }
