@@ -84,16 +84,16 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
     }
 }
 
-static GLOBAL_COUNTER: Mutex<u32> = Mutex::new(0);
+// static GLOBAL_COUNTER: Mutex<u32> = Mutex::new(0);
 
-fn increment_counter() {
-    let mut counter = GLOBAL_COUNTER.lock().unwrap();
-    *counter += 1;
-}
+// fn increment_counter() {
+//     let mut counter = GLOBAL_COUNTER.lock().unwrap();
+//     *counter += 1;
+// }
 
-fn get_counter() -> u32 {
-    return *GLOBAL_COUNTER.lock().unwrap()
-}
+// fn get_counter() -> u32 {
+//     return *GLOBAL_COUNTER.lock().unwrap()
+// }
 
 // Code to substitute variables in an expressions, to make the IVL commands into DSA
 // fn sub_new_var(expr:Expr) -> Result<Expr>{
@@ -105,14 +105,13 @@ fn get_counter() -> u32 {
 
 // Code to make IVL commands to DSA form (Dynamic Single Assignment)
 // MAYBE NOT IVLCmdKind but just IVLCmd
-fn ivl_to_dsa(ivl: &IVLCmd) -> Result<IVLCmdKind>{
-    match &ivl.kind {
-        IVLCmdKind::Assignment { name, expr } => Ok(IVLCmdKind::Assignment { name: (), expr: () }),
-        _ => todo!("Not supported (yet)."),
-    }
+// fn ivl_to_dsa(ivl: &IVLCmd) -> Result<IVLCmdKind>{
+//     match &ivl.kind {
+//         IVLCmdKind::Assignment { name, expr } => Ok(IVLCmdKind::Assignment { name: (), expr: () }),
+//         _ => todo!("Not supported (yet)."),
+//     }
 
-}
-
+// }
 
 // Weakest precondition of (assert-only) IVL programs comprised of a single assertion
 fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
@@ -128,9 +127,12 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
         IVLCmdKind::Seq(command1, command2) => {
             Ok((wp(command1, &wp(command2, postcon)?.0)?.0, "SEQ".to_string()))
         },
-        // IVLCmdKind::Assignment { name, expr } => {
-        //     Ok(expr.subst_ident(from, to))
-        // }
+        //After the code is transformed to dsa
+        //we compute wp by assuming the assigment, for example if we have x:=3 we assume x==3
+        // (name==expr) ==> postcond
+        IVLCmdKind::Assignment { name, expr } =>  {
+        Ok(((Expr::ident(&name.ident, &expr.ty).op(slang::ast::Op::Eq, expr)).imp(postcon), "Assignment".to_string()))
+        }
         _ => todo!("Not supported (yet)."),
     }
 }
