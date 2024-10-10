@@ -1,10 +1,12 @@
 pub mod ivl;
 mod ivl_ext;
-use std::sync::{Mutex, Arc};
-use std::thread;
+use itertools::fold;
 use ivl::{IVLCmd, IVLCmdKind};
-use slang::ast::{Cmd, CmdKind, Expr};
+use slang::ast::{Cmd, CmdKind, Expr, ExprKind, Ident, Name, Var};
 use slang_ui::prelude::*;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 pub struct App;
 
@@ -71,7 +73,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
         // Assume has not been documented in the report yet
         // Assume just takes the High level command Assume and passes the condition onto the assume IVL command
         // For the statement "assume true" the condition is "true" | for the statement "assume x == 2" the condition is "x == 2"
-        CmdKind::Assume { condition, .. } => Ok(IVLCmd::assume(condition)), 
+        CmdKind::Assume { condition, .. } => Ok(IVLCmd::assume(condition)),
         // Seq has not been documented in the report yet
         // Seq takes 2 commands in the higher level language (CmdKind) and passes them unto the IVLCmd seq
         // Note: the commands have to be processed as well, so that the IVL command seq does not pass on higer level commands
@@ -84,17 +86,6 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
     }
 }
 
-static GLOBAL_COUNTER: Mutex<u32> = Mutex::new(0);
-
-fn increment_counter() {
-    let mut counter = GLOBAL_COUNTER.lock().unwrap();
-    *counter += 1;
-}
-
-fn get_counter() -> u32 {
-    return *GLOBAL_COUNTER.lock().unwrap()
-}
-
 // Code to substitute variables in an expressions, to make the IVL commands into DSA
 // fn sub_new_var(expr:Expr) -> Result<Expr>{
 //     match &expr {
@@ -103,15 +94,39 @@ fn get_counter() -> u32 {
 //     }
 // }
 
+// Initializing an empty hashmap
+fn init_map() -> HashMap<Ident, i32> {
+    HashMap::new()
+}
+
 // Code to make IVL commands to DSA form (Dynamic Single Assignment)
 // MAYBE NOT IVLCmdKind but just IVLCmd
-fn ivl_to_dsa(ivl: &IVLCmd) -> Result<IVLCmdKind>{
+fn ivl_to_dsa(ivl: &IVLCmd, VariableMap: &mut HashMap<Ident, i32>) -> Result<IVLCmdKind> {
     match &ivl.kind {
-        IVLCmdKind::Assignment { name, expr } => Ok(IVLCmdKind::Assignment { name: (), expr: () }),
+        IVLCmdKind::Assignment { name, expr } => Ok(IVLCmdKind::Assignment {
+            name: Name::ident(update_variable_name(&name.ident, VariableMap)),
+            expr: (VariableMap.iter().fold(expr.clone(), |acc, (var, &val)| {
+                expr.subst_ident(var, Ident::new(format!("{}_{}", var, &val)))
+            })),
+        }),
         _ => todo!("Not supported (yet)."),
     }
-
 }
+
+// Updates a variable to the newest version according to the map
+fn update_variable_name(variable: &Ident, map: &mut HashMap<Ident, i32>) -> Ident {
+    // Check if the variable exists in the map
+    let counter = map.entry(variable.clone()).or_insert(0);
+    *counter += 1;
+
+    // Return the new variable name with the counter
+    let new_variable_name = format!("{}_{}", variable, counter);
+
+    // Create an Ident instance
+    Ident(new_variable_name)
+   
+}
+
 
 
 // Weakest precondition of (assert-only) IVL programs comprised of a single assertion
@@ -121,16 +136,17 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
         // Assume has not been documented in the report yet
         // Here the wp of assume with the condition, C, takes the postcondition, G, and returns the weakest precondition:
         // I.e. : wp[assume C](G) = C -> G
-        IVLCmdKind::Assume { condition } => Ok((condition.clone().imp(postcon), "HERE".to_string())),
+        IVLCmdKind::Assume { condition } => {
+            Ok((condition.clone().imp(postcon), "HERE".to_string()))
+        }
         // Seq has not been documented in the report yet
-        // Here the wp of assume with the commands: command1 and command2 and the postcondition G returns the weakest precondition:  
+        // Here the wp of assume with the commands: command1 and command2 and the postcondition G returns the weakest precondition:
         // I.e. : wp[command1;command2](G) = wp[command1]( wp[command2](G) )
-        IVLCmdKind::Seq(command1, command2) => {
-            Ok((wp(command1, &wp(command2, postcon)?.0)?.0, "SEQ".to_string()))
-        },
-        // IVLCmdKind::Assignment { name, expr } => {
-        //     Ok(expr.subst_ident(from, to))
-        // }
+        IVLCmdKind::Seq(command1, command2) => Ok((
+            wp(command1, &wp(command2, postcon)?.0)?.0,
+            "SEQ".to_string(),
+        )),
+        IVLCmdKind::Assignment { name, expr } => Ok(),
         _ => todo!("Not supported (yet)."),
     }
 }
