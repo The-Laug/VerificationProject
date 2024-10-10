@@ -105,13 +105,14 @@ fn get_counter() -> u32 {
 
 // Code to make IVL commands to DSA form (Dynamic Single Assignment)
 // MAYBE NOT IVLCmdKind but just IVLCmd
-// fn ivl_to_dsa(ivl: &IVLCmd) -> Result<IVLCmdKind>{
-//     match &ivl.kind {
-//         IVLCmdKind::Assignment { name, expr } => Ok(IVLCmdKind::Assignment { name: (), expr: () }),
-//         _ => todo!("Not supported (yet)."),
-//     }
+fn ivl_to_dsa(ivl: &IVLCmd) -> Result<IVLCmdKind>{
+    match &ivl.kind {
+        IVLCmdKind::Assignment { name, expr } => Ok(IVLCmdKind::Assignment { name: (), expr: () }),
+        _ => todo!("Not supported (yet)."),
+    }
 
-// }
+}
+
 
 // Weakest precondition of (assert-only) IVL programs comprised of a single assertion
 fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
@@ -127,9 +128,9 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
         IVLCmdKind::Seq(command1, command2) => {
             Ok((wp(command1, &wp(command2, postcon)?.0)?.0, "SEQ".to_string()))
         },
-        IVLCmdKind::Assignment { name, expr } => {
-            Ok()
-        }
+        // IVLCmdKind::Assignment { name, expr } => {
+        //     Ok(expr.subst_ident(from, to))
+        // }
         _ => todo!("Not supported (yet)."),
     }
 }
