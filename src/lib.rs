@@ -101,14 +101,45 @@ fn init_map() -> HashMap<Ident, i32> {
 
 // Code to make IVL commands to DSA form (Dynamic Single Assignment)
 // MAYBE NOT IVLCmdKind but just IVLCmd
-fn ivl_to_dsa(ivl: &IVLCmd, VariableMap: &mut HashMap<Ident, i32>) -> Result<IVLCmdKind> {
+fn ivl_to_dsa(ivl: &IVLCmd, VariableMap: &mut HashMap<Ident, i32>) -> Result<IVLCmd> {
     match &ivl.kind {
-        IVLCmdKind::Assignment { name, expr } => Ok(IVLCmdKind::Assignment {
-            name: Name::ident(update_variable_name(&name.ident, VariableMap)),
-            expr: (VariableMap.iter().fold(expr.clone(), |acc, (var, &val)| {
-                expr.subst_ident(var, Ident::new(format!("{}_{}", var, &val)))
-            })),
-        }),
+        IVLCmdKind::Assignment { name, expr } => {
+            let expr = (VariableMap.iter().fold(expr.clone(), |acc, (var, &val)| {
+                let new_ident = Ident(format!("{}_{}", var, val));
+                let new_expr = Expr::ident(&new_ident, &acc.ty);
+                acc.subst_ident(var, &new_expr)
+            }));
+            Ok(IVLCmd::assign(
+                &Name::ident(update_variable_name(&name.ident, VariableMap)),
+                &expr,
+            ))
+        }
+        IVLCmdKind::Seq(command1, command2) => Ok(IVLCmd::seq(
+            &(ivl_to_dsa(command1, VariableMap)?),
+            &(ivl_to_dsa(command2, VariableMap)?),
+        )),
+        IVLCmdKind::Assert { condition, message } => Ok(IVLCmd::assert(&(VariableMap
+            .iter()
+            .fold(condition.clone(), |acc, (var, &val)| {
+                let new_ident = Ident(format!("{}_{}", var, val));
+                let new_expr = Expr::ident(&new_ident, &acc.ty);
+                acc.subst_ident(var, &new_expr)
+            })), &message.clone())
+            
+        ),
+        IVLCmdKind::Assume { condition } => Ok(IVLCmd::assume(&(VariableMap
+            .iter()
+            .fold(condition.clone(), |acc, (var, &val)| {
+                let new_ident = Ident(format!("{}_{}", var, val));
+                let new_expr = Expr::ident(&new_ident, &acc.ty);
+                acc.subst_ident(var, &new_expr)
+            })))),
+    
+        
+        // IVLCmdKind::NonDet(command1, command2) => Ok(IVLCmdKind::NonDet(
+        //     Box::new(ivl_to_dsa(command1, VariableMap)?),
+        //     Box::new(ivl_to_dsa(command2, VariableMap)?),
+        // )),
         _ => todo!("Not supported (yet)."),
     }
 }
@@ -124,10 +155,7 @@ fn update_variable_name(variable: &Ident, map: &mut HashMap<Ident, i32>) -> Iden
 
     // Create an Ident instance
     Ident(new_variable_name)
-   
 }
-
-
 
 // Weakest precondition of (assert-only) IVL programs comprised of a single assertion
 fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
