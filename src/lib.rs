@@ -100,25 +100,37 @@ fn init_map() -> HashMap<Ident, i32> {
 }
 
 // Code to make IVL commands to DSA form (Dynamic Single Assignment)
-// MAYBE NOT IVLCmdKind but just IVLCmd
-fn ivl_to_dsa(ivl: &IVLCmd, VariableMap: &mut HashMap<Ident, i32>) -> Result<IVLCmd> {
+// This code works by creating a map variable_map, which keeps track of all the variables and maps them to the number of times they occur in the program.
+// Using the variable_map, we can change the name of each of the variables, to the variablename concatenated with the number.
+fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IVLCmd> {
     match &ivl.kind {
+        // For each of the variables in the variable_map we check whether the variable occurs in the expression (rhs of the assignment)
+        // If the variable occur, we change it with the value found in the map (ie. "x" becomes "x5" etc.) and we look for the next variable in the variable_map.
+        // Then we look for the variable which gets assigned (the lhs of the assignment) and updates it in the variable_map (see definition of update_variable_name)
+        // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
         IVLCmdKind::Assignment { name, expr } => {
-            let expr = (VariableMap.iter().fold(expr.clone(), |acc, (var, &val)| {
+            let expr = (variable_map.iter().fold(expr.clone(), |acc, (var, &val)| {
                 let new_ident = Ident(format!("{}_{}", var, val));
                 let new_expr = Expr::ident(&new_ident, &acc.ty);
                 acc.subst_ident(var, &new_expr)
             }));
             Ok(IVLCmd::assign(
-                &Name::ident(update_variable_name(&name.ident, VariableMap)),
+                &Name::ident(update_variable_name(&name.ident, variable_map)),
                 &expr,
             ))
-        }
+        },
+        // For the sequence we simply run the ivl_to_dsa for each of the commands
+        // We assume that the rust program runs in sequential order, such that the variable_map gets updated by the first block before being used for the second one.
         IVLCmdKind::Seq(command1, command2) => Ok(IVLCmd::seq(
-            &(ivl_to_dsa(command1, VariableMap)?),
-            &(ivl_to_dsa(command2, VariableMap)?),
+            &(ivl_to_dsa(command1, variable_map)?),
+            &(ivl_to_dsa(command2, variable_map)?),
         )),
-        IVLCmdKind::Assert { condition, message } => Ok(IVLCmd::assert(&(VariableMap
+        // For assert we do the same as for assign except we only have an expression, not a new variable.
+        // Iterate through the variable_map
+        // For each variable look for and change the variable for the appropriate value
+        // Continue with the rest of the map
+        // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
+        IVLCmdKind::Assert { condition, message } => Ok(IVLCmd::assert(&(variable_map
             .iter()
             .fold(condition.clone(), |acc, (var, &val)| {
                 let new_ident = Ident(format!("{}_{}", var, val));
@@ -127,19 +139,25 @@ fn ivl_to_dsa(ivl: &IVLCmd, VariableMap: &mut HashMap<Ident, i32>) -> Result<IVL
             })), &message.clone())
             
         ),
-        IVLCmdKind::Assume { condition } => Ok(IVLCmd::assume(&(VariableMap
+        // For assume we do the same as for assign except we only have an expression, not a new variable.
+        // Iterate through the variable_map
+        // For each variable look for and change the variable for the appropriate value
+        // Continue with the rest of the map
+        // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
+        IVLCmdKind::Assume { condition } => Ok(IVLCmd::assume(&(variable_map
             .iter()
             .fold(condition.clone(), |acc, (var, &val)| {
                 let new_ident = Ident(format!("{}_{}", var, val));
                 let new_expr = Expr::ident(&new_ident, &acc.ty);
                 acc.subst_ident(var, &new_expr)
             })))),
-    
-        
-        // IVLCmdKind::NonDet(command1, command2) => Ok(IVLCmdKind::NonDet(
-        //     Box::new(ivl_to_dsa(command1, VariableMap)?),
-        //     Box::new(ivl_to_dsa(command2, VariableMap)?),
-        // )),
+        // For nondeterministic blocks we want to first compute the DSA of each individual command block
+        // Then have a way of combining the resultant variable_maps, to make sure that we take the highest value for each variable
+        // Finally we want to add assignments in the end of the blocks, to synchronize the variables.
+        IVLCmdKind::NonDet(command1, command2) => Ok(IVLCmd::nondet(
+            &(ivl_to_dsa(command1, variable_map)?),
+            &(ivl_to_dsa(command2, variable_map)?),
+        )),
         _ => todo!("Not supported (yet)."),
     }
 }
@@ -148,6 +166,7 @@ fn ivl_to_dsa(ivl: &IVLCmd, VariableMap: &mut HashMap<Ident, i32>) -> Result<IVL
 fn update_variable_name(variable: &Ident, map: &mut HashMap<Ident, i32>) -> Ident {
     // Check if the variable exists in the map
     let counter = map.entry(variable.clone()).or_insert(0);
+    // If it does increase its value by 1, otherwise add it to the map.
     *counter += 1;
 
     // Return the new variable name with the counter
