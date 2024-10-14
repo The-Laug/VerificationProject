@@ -189,11 +189,15 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
         // Seq has not been documented in the report yet
         // Here the wp of assume with the commands: command1 and command2 and the postcondition G returns the weakest precondition:
         // I.e. : wp[command1;command2](G) = wp[command1]( wp[command2](G) )
-        IVLCmdKind::Seq(command1, command2) => Ok((
-            wp(command1, &wp(command2, postcon)?.0)?.0,
-            "SEQ".to_string(),
-        )),
-        IVLCmdKind::Assignment { name, expr } => Ok(),
+        IVLCmdKind::Seq(command1, command2) => {
+            Ok((wp(command1, &wp(command2, postcon)?.0)?.0, "SEQ".to_string()))
+        },
+        //After the code is transformed to dsa
+        //we compute wp by assuming the assigment, for example if we have x:=3 we assume x==3
+        // (name==expr) ==> postcond
+        IVLCmdKind::Assignment { name, expr } =>  {
+        Ok(((Expr::ident(&name.ident, &expr.ty).op(slang::ast::Op::Eq, expr)).imp(postcon), "Assignment".to_string()))
+        }
         _ => todo!("Not supported (yet)."),
     }
 }
