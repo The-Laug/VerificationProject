@@ -2,7 +2,8 @@ pub mod ivl;
 mod ivl_ext;
 use itertools::fold;
 use ivl::{IVLCmd, IVLCmdKind};
-use slang::ast::{Cmd, CmdKind, Expr, ExprKind, Ident, Name, Var};
+use slang::ast::{Cmd, CmdKind, Expr, Quantifier, Type, Var};
+use slang::Span;
 use slang_ui::prelude::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -88,6 +89,29 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
             &cmd_to_ivlcmd(command2)?,
         )),
         CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
+
+        CmdKind::VarDefinition { name, ty: (_span, ty), expr }=>{ 
+            Ok(
+                match expr {
+                    Some(expr_value) => {
+                        // ask the ta
+                        //not sure if we should do the havoc before assign or assign is enough 
+                        //if we should perform the havoc before then IVLCmd::seq(&hav, &cmdd) should be called
+                        //but then the wp of assign is implemented twice so we should fix the implementation
+                        //the logic is true implementation is false
+
+                        // let hav=IVLCmd::havoc(name, ty);                             
+                        let cmdd = IVLCmd::assign(name, expr_value);
+                        cmdd 
+                        // IVLCmd::seq(&hav, &cmdd)  
+                    },
+                    None => {
+                        IVLCmd::havoc(name, ty)
+                    }
+                }
+            )
+    },
+
         _ => todo!("Not supported (yet)."),
     }
 }
@@ -253,7 +277,24 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
         // (name==expr) ==> postcond
         IVLCmdKind::Assignment { name, expr } =>  {
         Ok(((Expr::ident(&name.ident, &expr.ty).op(slang::ast::Op::Eq, expr)).imp(postcon), "Assignment".to_string()))
+        },
+        //wp of havoc
+        //the logic is true but we should make sure that span.Default() is true
+        IVLCmdKind::Havoc { name, ty }=>{
+            Ok((
+                Expr::quantifier(
+                    Quantifier::Forall, 
+                    &[Var {
+                        span: Span::default(),       
+                        name: name.clone(),     
+                        ty: (Span::default(), ty.clone()), 
+                    }],
+                    postcon
+                ),
+                "HERE".to_string()
+            ))
         }
+        ,
         _ => todo!("Not supported (yet)."),
     }
 }
