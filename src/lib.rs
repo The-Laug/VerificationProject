@@ -36,6 +36,9 @@ impl slang_ui::Hook for App {
             let ivl = cmd_to_ivlcmd(cmd)?;
             // Convert IVL to DSA
             let dsa = ivl_to_dsa(&ivl, &mut init_map())?;
+
+            print!("dsa: ");
+            print!("{}", dsa.to_string());
             // Calculate obligation and error message (if obligation is not
             // verified)
             let (oblig, msg) = wp(&dsa, &Expr::bool(true))?;
@@ -108,8 +111,8 @@ fn synchronize_cmd(com1:IVLCmd,map1:HashMap<Ident, i32>, map2: HashMap<Ident, i3
     for (key,value1) in map1 {
         if let Some(&value2) = map2.get(&key) {
             if value2 > value1 {
-                let new_ident = Ident(format!("{}_{}", key, value2));
-                let old_ident = Ident(format!("{}_{}", key, value1));
+                let new_ident = Ident(format!("{}{}", key, value2));
+                let old_ident = Ident(format!("{}{}", key, value1));
                 let assign = IVLCmd::assign(&Name::ident(new_ident), &Expr::ident(&old_ident, &Type::Unknown { name: Name::ident(old_ident.clone()) }));
                 IVLCmd::seq(&com1, &assign);
             }
@@ -147,7 +150,7 @@ fn update_variable_name(variable: &Ident, map: &mut HashMap<Ident, i32>) -> Iden
     *counter += 1;
 
     // Return the new variable name with the counter
-    let new_variable_name = format!("{}_{}", variable, counter);
+    let new_variable_name = format!("{}{}", variable, counter);
 
     // Create an Ident instance
     Ident(new_variable_name)
@@ -165,7 +168,7 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
         // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
         IVLCmdKind::Assignment { name, expr } => {
             let expr = (variable_map.iter().fold(expr.clone(), |acc, (var, &val)| {
-                let new_ident = Ident(format!("{}_{}", var, val));
+                let new_ident = Ident(format!("{}{}", var, val));
                 let new_expr = Expr::ident(&new_ident, &acc.ty);
                 acc.subst_ident(var, &new_expr)
             }));
@@ -188,7 +191,7 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
         IVLCmdKind::Assert { condition, message } => Ok(IVLCmd::assert(&(variable_map
             .iter()
             .fold(condition.clone(), |acc, (var, &val)| {
-                let new_ident = Ident(format!("{}_{}", var, val));
+                let new_ident = Ident(format!("{}{}", var, val));
                 let new_expr = Expr::ident(&new_ident, &acc.ty);
                 acc.subst_ident(var, &new_expr)
             })), &message.clone())
@@ -202,7 +205,7 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
         IVLCmdKind::Assume { condition } => Ok(IVLCmd::assume(&(variable_map
             .iter()
             .fold(condition.clone(), |acc, (var, &val)| {
-                let new_ident = Ident(format!("{}_{}", var, val));
+                let new_ident = Ident(format!("{}{}", var, val));
                 let new_expr = Expr::ident(&new_ident, &acc.ty);
                 acc.subst_ident(var, &new_expr)
             })))),
