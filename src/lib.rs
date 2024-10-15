@@ -7,6 +7,7 @@ use slang_ui::prelude::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use crate::slang::ast::Type;
 
 pub struct App;
 
@@ -33,9 +34,11 @@ impl slang_ui::Hook for App {
             let cmd = &m.body.clone().unwrap().cmd;
             // Encode it in IVL
             let ivl = cmd_to_ivlcmd(cmd)?;
+            // Convert IVL to DSA
+            let dsa = ivl_to_dsa(&ivl, &mut init_map())?;
             // Calculate obligation and error message (if obligation is not
             // verified)
-            let (oblig, msg) = wp(&ivl, &Expr::bool(true))?;
+            let (oblig, msg) = wp(&dsa, &Expr::bool(true))?;
             // Convert obligation to SMT expression
             let soblig = oblig.smt()?;
 
@@ -99,6 +102,58 @@ fn init_map() -> HashMap<Ident, i32> {
     HashMap::new()
 }
 
+
+
+fn synchronize_cmd(com1:IVLCmd,map1:HashMap<Ident, i32>, map2: HashMap<Ident, i32> ) -> IVLCmd {
+    for (key,value1) in map1 {
+        if let Some(&value2) = map2.get(&key) {
+            if value2 > value1 {
+                let new_ident = Ident(format!("{}_{}", key, value2));
+                let old_ident = Ident(format!("{}_{}", key, value1));
+                let assign = IVLCmd::assign(&Name::ident(new_ident), &Expr::ident(&old_ident, &Type::Unknown { name: Name::ident(old_ident.clone()) }));
+                IVLCmd::seq(&com1, &assign);
+            }
+        }
+    }
+    com1
+}
+
+
+// Maybe not sure
+fn update_variable_map(variable_map: &mut HashMap<Ident, i32>, map1: &HashMap<Ident, i32>, map2: &HashMap<Ident, i32>) {
+    // Iterate over map1 and update variable_map
+    for (key, &value1) in map1.iter() {
+        let entry = variable_map.entry(key.clone()).or_insert(value1);
+        if value1 > *entry {
+            *entry = value1;
+        }
+    }
+
+    // Iterate over map2 and update variable_map
+    for (key, &value2) in map2.iter() {
+        let entry = variable_map.entry(key.clone()).or_insert(value2);
+        if value2 > *entry {
+            *entry = value2;
+        }
+    }
+}
+
+
+// Updates a variable to the newest version according to the map
+fn update_variable_name(variable: &Ident, map: &mut HashMap<Ident, i32>) -> Ident {
+    // Check if the variable exists in the map
+    let counter = map.entry(variable.clone()).or_insert(0);
+    // If it does increase its value by 1, otherwise add it to the map.
+    *counter += 1;
+
+    // Return the new variable name with the counter
+    let new_variable_name = format!("{}_{}", variable, counter);
+
+    // Create an Ident instance
+    Ident(new_variable_name)
+}
+
+
 // Code to make IVL commands to DSA form (Dynamic Single Assignment)
 // This code works by creating a map variable_map, which keeps track of all the variables and maps them to the number of times they occur in the program.
 // Using the variable_map, we can change the name of each of the variables, to the variablename concatenated with the number.
@@ -154,32 +209,30 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
         // For nondeterministic blocks we want to first compute the DSA of each individual command block
         // Then have a way of combining the resultant variable_maps, to make sure that we take the highest value for each variable
         // Finally we want to add assignments in the end of the blocks, to synchronize the variables.
-        IVLCmdKind::NonDet(command1, command2) => Ok(IVLCmd::nondet(
-            &(ivl_to_dsa(command1, variable_map)?),
-            &(ivl_to_dsa(command2, variable_map)?),
-        )),
+        IVLCmdKind::NonDet(command1, command2) => {
+            let map1 = &mut variable_map.clone();
+            let map2 = &mut variable_map.clone();
+            let com1 = ivl_to_dsa(command1,  map1)?;
+            let com2 = ivl_to_dsa(command2,  map2)?;
+            let done_com1 = synchronize_cmd(com1, map1.clone(), map2.clone());
+            let done_com2 = synchronize_cmd(com2, map2.clone(), map1.clone());
+            update_variable_map(variable_map, map1,  map2);
+            Ok(IVLCmd::nondet(
+                &(done_com1),
+                &(done_com2),
+            ))
+        },
+        
         _ => todo!("Not supported (yet)."),
     }
 }
 
-// Updates a variable to the newest version according to the map
-fn update_variable_name(variable: &Ident, map: &mut HashMap<Ident, i32>) -> Ident {
-    // Check if the variable exists in the map
-    let counter = map.entry(variable.clone()).or_insert(0);
-    // If it does increase its value by 1, otherwise add it to the map.
-    *counter += 1;
 
-    // Return the new variable name with the counter
-    let new_variable_name = format!("{}_{}", variable, counter);
-
-    // Create an Ident instance
-    Ident(new_variable_name)
-}
 
 // Weakest precondition of (assert-only) IVL programs comprised of a single assertion
 fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
     match &ivl.kind {
-        IVLCmdKind::Assert { condition, message } => Ok((condition.clone(), message.clone())),
+        IVLCmdKind::Assert { condition, message } => Ok((condition.clone().and(postcon), message.clone())),
         // Assume has not been documented in the report yet
         // Here the wp of assume with the condition, C, takes the postcondition, G, and returns the weakest precondition:
         // I.e. : wp[assume C](G) = C -> G
