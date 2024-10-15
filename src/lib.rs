@@ -8,7 +8,6 @@ use slang_ui::prelude::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use crate::slang::ast::Type;
 
 pub struct App;
 
