@@ -2,7 +2,7 @@ pub mod ivl;
 mod ivl_ext;
 use itertools::fold;
 use ivl::{IVLCmd, IVLCmdKind};
-use slang::ast::{Cmd, CmdKind, Expr, Quantifier, Type, Var};
+use slang::ast::{Cmd, CmdKind, Expr, ExprKind, Ident, Name, Quantifier, Type, Var};
 use slang::Span;
 use slang_ui::prelude::*;
 use std::collections::HashMap;
