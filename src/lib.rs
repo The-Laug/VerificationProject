@@ -104,6 +104,27 @@ fn invariants_expression(invariants: &Vec<Expr>) -> Expr {
     in_exp
 }
 
+//related to Core B
+// Recursive function to iterate over `Cmd` and handle assignments
+fn iterate_over_cmd(cmd: Option<&Cmd>) {
+    if let Some(cmd) = cmd {
+        match &cmd.kind {
+            CmdKind::Assignment { name, expr } => {
+                println!("Assignment to variable: {}", name.ident.0);
+            }
+            CmdKind::Seq(command1, command2) => {
+                iterate_over_cmd(Some(command1));
+                iterate_over_cmd(Some(command2));
+            }
+            _ => {
+                println!("Other command encountered.");
+            }
+        }
+    } else {
+        // Handle the None case, if needed
+        println!("No command found (None).");
+    }
+}
 
 
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
@@ -127,9 +148,8 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             let invariantExpr=invariants_expression(invariants);
 
             let cmd_case=body.cases.first().map(|case| &case.cmd);
-            println!("in cmd to ivl");
-                        println!("{:?}", cmd_case);
-                        println!("in cmd to ivl");
+            
+            iterate_over_cmd(cmd_case);
             // assert i
             //ask ta what should we havoc here..
             // havoc x
