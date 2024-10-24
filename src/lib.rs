@@ -218,8 +218,14 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
         }
 
         CmdKind::Match { body } => {
-            // Assuming `body` is of type `Cases` and `Cases` is a vector of `Case`
+            // Here, we create a start for the match, which we can use as an initial point for the fold function
+            // The initial case is "Assume false;assert True"
             let start= IVLCmd::seq(&IVLCmd::assume(&Expr::bool(false)), &IVLCmd::assert(&Expr::bool(true), "message"));
+            // Here we call the fold function, which takes the start and the cases from the match. 
+            // The fold function will iterate over the cases and create a command for each case, which is then combined with the previous command.
+            // The fold collects new cases with a NonDet command. 
+            // With the initial command the fold output looks like this:
+            // Assume false ; assert true [] assume b1; c1 [] assume b2; c2 [] assume b3; c3 
             let command = body.cases.iter().fold(start , |acc: IVLCmd, case : &Case| {
                 let con = case.condition.clone();
                 let case_command = case.cmd.clone();
