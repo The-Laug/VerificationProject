@@ -1,9 +1,10 @@
 pub mod ivl;
 mod ivl_ext;
-use std::sync::{Mutex, Arc};
+use std::sync::{Arc, Mutex};
 use std::thread;
+
 use ivl::{IVLCmd, IVLCmdKind};
-use slang::ast::{Cmd, CmdKind, Expr, Quantifier, Type, Var};
+use slang::ast::{Cmd, CmdKind, Expr, Method, Quantifier, Type, Var};
 use slang::Span;
 use slang_ui::prelude::*;
 
@@ -30,8 +31,14 @@ impl slang_ui::Hook for App {
 
             // Get method's body
             let cmd = &m.body.clone().unwrap().cmd;
+
+            // println!("in cmd to ivl");
+            //             println!("{:?}", (m));
+            //             println!("in cmd to ivl");
+
+
             // Encode it in IVL
-            let ivl = cmd_to_ivlcmd(cmd)?;
+            let ivl = cmd_to_ivlcmd(cmd, &m)?;
             // Calculate obligation and error message (if obligation is not
             // verified)
             let (oblig, msg) = wp(&ivl, &Expr::bool(true))?;
@@ -64,45 +71,104 @@ impl slang_ui::Hook for App {
     }
 }
 
+// //in this method i am returning all require expressions as 1 assume and between each there is and
+// fn requires_expressions(method: &Method) -> Cmd {
+//     let mut req_exp = Expr::bool(true);
+
+//     // Combine all requires expressions into a single expression using AND
+//     for req in method.requires() {
+//         let expr = req.clone();
+//         req_exp = Expr::and(&req_exp, &expr);
+//     }
+
+//     Cmd::assume(&req_exp)
+// }
+
+//in this method i am returning all ensures expressions as 1 expr and between each there is and
+fn ensures_expressions(method: &Method) -> (Expr, bool) {
+    let mut ens_exp = Expr::bool(true);
+
+    let mut ensures_iter = method.ensures();
+    let has_ensures = ensures_iter.next().is_some(); // true if there is at least one expression
+
+
+    for ens in method.ensures() {
+        let expr = ens.clone();
+        ens_exp = Expr::and(&ens_exp, &expr);
+       
+    }
+
+    (ens_exp, has_ensures)
+}
+
+
+
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
 // a single assertion)
-fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
+fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
     match &cmd.kind {
         CmdKind::Assert { condition, .. } => Ok(IVLCmd::assert(condition, "Assert might fail!")),
         // Assume has not been documented in the report yet
         // Assume just takes the High level command Assume and passes the condition onto the assume IVL command
         // For the statement "assume true" the condition is "true" | for the statement "assume x == 2" the condition is "x == 2"
-        CmdKind::Assume { condition, .. } => Ok(IVLCmd::assume(condition)), 
+        CmdKind::Assume { condition, .. } => Ok(IVLCmd::assume(condition)),
         // Seq has not been documented in the report yet
         // Seq takes 2 commands in the higher level language (CmdKind) and passes them unto the IVLCmd seq
         // Note: the commands have to be processed as well, so that the IVL command seq does not pass on higer level commands
         CmdKind::Seq(command1, command2) => Ok(IVLCmd::seq(
-            &cmd_to_ivlcmd(command1)?,
-            &cmd_to_ivlcmd(command2)?,
+            &cmd_to_ivlcmd(command1, &method)?,
+            &cmd_to_ivlcmd(command2, &method)?,
         )),
         CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
-
-        CmdKind::VarDefinition { name, ty: (_span, ty), expr }=>{ 
-            Ok(
-                match expr {
-                    Some(expr_value) => {
-                        // ask the ta
-                        //not sure if we should do the havoc before assign or assign is enough 
-                        //if we should perform the havoc before then IVLCmd::seq(&hav, &cmdd) should be called
-                        //but then the wp of assign is implemented twice so we should fix the implementation
-                        //the logic is true implementation is false
-
-                        // let hav=IVLCmd::havoc(name, ty);                             
-                        let cmdd = IVLCmd::assign(name, expr_value);
-                        cmdd 
-                        // IVLCmd::seq(&hav, &cmdd)  
-                    },
-                    None => {
-                        IVLCmd::havoc(name, ty)
+        CmdKind::Return { expr } => {
+            let re_ensure = ensures_expressions(&method);
+            //first of all check if the method is returning something
+            //if no ignore the return cmdKind
+            match expr {
+                Some(expr_value) => {
+                    //here i should find if there are ensures in the specifications
+                    //if yes then i should assert it else i should nop()
+                    if re_ensure.1 {
+                        // println!("in cmd to ivl");
+                        // println!("{:?}", &re_ensure.0.subst_result(expr_value));
+                        // println!("in cmd to ivl");
+                        //here re_ensure.0 is th expr that hold all ensures
+                        //my aim is to change the appearance of result by expr_value
+                        Ok(IVLCmd::assert(
+                            &re_ensure.0.subst_result(expr_value),
+                            "Ensures might fail!",
+                        ))
+                    } else {
+                        Ok(IVLCmd::nop())
                     }
                 }
-            )
-    },
+                None => Ok(IVLCmd::nop()),
+            }
+
+            // Ok(IVLCmd::nop())
+        }
+
+        CmdKind::VarDefinition {
+            name,
+            ty: (_span, ty),
+            expr,
+        } => {
+            Ok(match expr {
+                Some(expr_value) => {
+                    // ask the ta
+                    //not sure if we should do the havoc before assign or assign is enough
+                    //if we should perform the havoc before then IVLCmd::seq(&hav, &cmdd) should be called
+                    //but then the wp of assign is implemented twice so we should fix the implementation
+                    //the logic is true implementation is false
+
+                    // let hav=IVLCmd::havoc(name, ty);
+                    let cmdd = IVLCmd::assign(name, expr_value);
+                    cmdd
+                    // IVLCmd::seq(&hav, &cmdd)
+                }
+                None => IVLCmd::havoc(name, ty),
+            })
+        }
 
         _ => todo!("Not supported (yet)."),
     }
@@ -140,40 +206,43 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
 // Weakest precondition of (assert-only) IVL programs comprised of a single assertion
 fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
     match &ivl.kind {
-        IVLCmdKind::Assert { condition, message } => Ok((condition.clone().and(postcon), message.clone())),
+        IVLCmdKind::Assert { condition, message } => {
+            Ok((condition.clone().and(postcon), message.clone()))
+        }
         // Assume has not been documented in the report yet
         // Here the wp of assume with the condition, C, takes the postcondition, G, and returns the weakest precondition:
         // I.e. : wp[assume C](G) = C -> G
-        IVLCmdKind::Assume { condition } => Ok((condition.clone().imp(postcon), "HERE".to_string())),
+        IVLCmdKind::Assume { condition } => {
+            Ok((condition.clone().imp(postcon), "HERE".to_string()))
+        }
         // Seq has not been documented in the report yet
-        // Here the wp of assume with the commands: command1 and command2 and the postcondition G returns the weakest precondition:  
+        // Here the wp of assume with the commands: command1 and command2 and the postcondition G returns the weakest precondition:
         // I.e. : wp[command1;command2](G) = wp[command1]( wp[command2](G) )
-        IVLCmdKind::Seq(command1, command2) => {
-            Ok((wp(command1, &wp(command2, postcon)?.0)?.0, "SEQ".to_string()))
-        },
+        IVLCmdKind::Seq(command1, command2) => Ok((
+            wp(command1, &wp(command2, postcon)?.0)?.0,
+            "SEQ".to_string(),
+        )),
         //After the code is transformed to dsa
         //we compute wp by assuming the assigment, for example if we have x:=3 we assume x==3
         // (name==expr) ==> postcond
-        IVLCmdKind::Assignment { name, expr } =>  {
-        Ok(((Expr::ident(&name.ident, &expr.ty).op(slang::ast::Op::Eq, expr)).imp(postcon), "Assignment".to_string()))
-        },
+        IVLCmdKind::Assignment { name, expr } => Ok((
+            (Expr::ident(&name.ident, &expr.ty).op(slang::ast::Op::Eq, expr)).imp(postcon),
+            "Assignment".to_string(),
+        )),
         //wp of havoc
         //the logic is true but we should make sure that span.Default() is true
-        IVLCmdKind::Havoc { name, ty }=>{
-            Ok((
-                Expr::quantifier(
-                    Quantifier::Forall, 
-                    &[Var {
-                        span: Span::default(),       
-                        name: name.clone(),     
-                        ty: (Span::default(), ty.clone()), 
-                    }],
-                    postcon
-                ),
-                "HERE".to_string()
-            ))
-        }
-        ,
+        IVLCmdKind::Havoc { name, ty } => Ok((
+            Expr::quantifier(
+                Quantifier::Forall,
+                &[Var {
+                    span: Span::default(),
+                    name: name.clone(),
+                    ty: (Span::default(), ty.clone()),
+                }],
+                postcon,
+            ),
+            "HERE".to_string(),
+        )),
         _ => todo!("Not supported (yet)."),
     }
 }
