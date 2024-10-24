@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use ivl::{IVLCmd, IVLCmdKind};
-use slang::ast::{Cmd, CmdKind, Expr, ExprKind, Ident, Method, Name, Quantifier, Type, Var};
+use slang::ast::{Cases, Cmd, CmdKind, Expr, ExprKind, Ident, Method, Name, Quantifier, Type, Var};
 use slang::Span;
 use slang_ui::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
 
@@ -38,21 +38,22 @@ impl slang_ui::Hook for App {
 
             // Encode it in IVL
             let mut ivl = cmd_to_ivlcmd(cmd, &m)?;
-            
+
             //Core A
             //checking if there is no return statement
             //if this is the case add the ensures as a post condition
+            //if there is return then it will be encoded in the Return encoding.
             if !contains_return(&m) {
                 let ensure = ensures_expressions(&m);
                 if ensure.1 {
+                    //it looks  a lot of statements to do simple thing but it worked
                     let new_cmd = Cmd::assert(&ensure.0, "ensure may fail");
                     let c = Box::new(new_cmd.clone());
                     let k = Box::new(cmd.seq(&c));
                     let h: &Box<Cmd> = &k;
                     ivl = cmd_to_ivlcmd(h, &m)?;
                 }
-            } 
-
+            }
 
             // Convert IVL to DSA
             let dsa = ivl_to_dsa(&ivl, &mut init_map())?;
@@ -91,7 +92,7 @@ impl slang_ui::Hook for App {
     }
 }
 
-//Core A check if it contains return
+//Core A check if a method contains return
 fn contains_return(method: &Method) -> bool {
     if let Some(block) = &method.body {
         return check_cmd_for_return(&block.cmd);
@@ -99,7 +100,7 @@ fn contains_return(method: &Method) -> bool {
     false
 }
 
-//Core A check if it contains return
+//Core A check a method contains return
 fn check_cmd_for_return(cmd: &Cmd) -> bool {
     match &cmd.kind {
         CmdKind::Return { expr: _ } => true,
@@ -139,24 +140,37 @@ fn invariants_expression(invariants: &Vec<Expr>) -> Expr {
     in_exp
 }
 
-//related to Core B
-// Recursive function to iterate over cmd and handle assignments
-fn iterate_over_cmd(cmd: Option<&Cmd>) -> Vec<Cmd> {
-    let mut var_definitions: Vec<Cmd> = Vec::new();
-    if let Some(cmd) = cmd {
-        match &cmd.kind {
-            CmdKind::Assignment { name, expr } => {
-                var_definitions.push(Cmd::vardef(name, &expr.clone().ty, &None));
-            }
-            CmdKind::Seq(command1, command2) => {
-                iterate_over_cmd(Some(command1));
-                iterate_over_cmd(Some(command2));
-            }
-            _ => {
-                println!("Other command encountered.");
-            }
+//Core B
+//These are 2 related functions that iterate over the cases and find the modified variables
+//the final result will be vec of Cmd::VarDef of thos modifies variables
+//in this implementation u will see duplicated varDef of the same var because is modified in more than
+//  one case, can be removed (I can do it if it helps u)
+//The idea of it is that before loop we should havoc before the loop
+//not sure how it will work with the dsa
+fn collect_var_definitions_in_cmd(cmd: &Cmd, var_definitions: &mut Vec<Cmd>) {
+    match &cmd.kind {
+        // If the command is an assignment, push a Cmd::vardef into the vector
+        CmdKind::Assignment { name, expr } => {
+            var_definitions.push(Cmd::vardef(name, &expr.ty, &None));
         }
+        // If the command is a sequence, recursively process both commands in the sequence
+        CmdKind::Seq(cmd1, cmd2) => {
+            collect_var_definitions_in_cmd(cmd1, var_definitions);
+            collect_var_definitions_in_cmd(cmd2, var_definitions);
+        }
+        _ => todo!("Not supported (yet)."),
     }
+}
+
+fn collect_var_definitions(cases: &Cases) -> Vec<Cmd> {
+    let mut var_definitions = Vec::new();
+
+    // Iterate over all the cases
+    for case in &cases.cases {
+        // Recursively process the commands inside each case
+        collect_var_definitions_in_cmd(&case.cmd, &mut var_definitions);
+    }
+
     var_definitions
 }
 
@@ -182,24 +196,21 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             variant,
             body,
         } => {
+            //first we need to do 
+            // assert I ;
+            //  havoc x;
+            //  assume I
             let invariant_expr = invariants_expression(invariants);
+            //I do not know how to make this flow in the cmds below
+            let assert_invariant = IVLCmd::assert(&invariant_expr, "invariant");
+            //assume invariant
+            let assume_invariant = IVLCmd::assume(&invariant_expr);
 
-            let cmd_case = body.cases.first().map(|case| &case.cmd);
-            //here i am creating cmd vardef for modified variables
-            let modified_vars = iterate_over_cmd(cmd_case);
-            if modified_vars.is_empty() {
-                println!("No modified variables.");
-            } else {
-                println!("Modified variables:");
-                for var in &modified_vars {
-                    println!("{:?}", var);
-                }
-            }
+            let modified_variables = collect_var_definitions(&body);
+            //The above variables should be connected in some way
 
-            // assert i
-            //ask ta what should we havoc here..
-            // havoc x
-            // assume i
+
+            // the cases of the loop should be handled as match
 
             Ok(IVLCmd::nop())
         }
