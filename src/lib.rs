@@ -1,8 +1,12 @@
 pub mod ivl;
 mod ivl_ext;
 use itertools::fold;
+use std::sync::{Arc, Mutex};
+use std::thread;
+
 use ivl::{IVLCmd, IVLCmdKind};
 use slang::ast::{Cmd, CmdKind, Expr, ExprKind, Ident, Name, Quantifier, Type, Var};
+use slang::ast::{Cmd, CmdKind, Expr, Method, Quantifier, Type, Var};
 use slang::Span;
 use slang_ui::prelude::*;
 use std::collections::HashMap;
@@ -34,7 +38,14 @@ impl slang_ui::Hook for App {
 
             // Get method's body
             let cmd = &m.body.clone().unwrap().cmd;
+
+                        // println!("in analyze");
+                        // println!("{:?}", (m));
+                        // println!("in analyze");
+
+
             // Encode it in IVL
+            let ivl = cmd_to_ivlcmd(cmd, &m)?;
             let ivl = cmd_to_ivlcmd(cmd)?;
             // Convert IVL to DSA
             let dsa = ivl_to_dsa(&ivl, &mut init_map())?;
@@ -73,23 +84,123 @@ impl slang_ui::Hook for App {
     }
 }
 
+
+
+//related to core A
+//in this method i am returning all ensures expressions as 1 expr and between each there is and
+fn ensures_expressions(method: &Method) -> (Expr, bool) {
+    let mut ens_exp = Expr::bool(true);
+
+    let mut ensures_iter = method.ensures();
+    let has_ensures = ensures_iter.next().is_some(); // true if there is at least one expression
+
+
+    for ens in method.ensures() {
+        let expr = ens.clone();
+        ens_exp = Expr::and(&ens_exp, &expr);
+       
+    }
+
+    (ens_exp, has_ensures)
+}
+
+//related to core B
+//in this method i am returning all invariants expressions as 1 expr and between each there is and
+fn invariants_expression(invariants: &Vec<Expr>) -> Expr {
+    let mut in_exp = Expr::bool(true);
+
+    for ens in invariants {
+        let expr = ens.clone();
+        in_exp = Expr::and(&in_exp, &expr);
+    }
+
+    in_exp
+}
+
+//related to Core B
+// Recursive function to iterate over `Cmd` and handle assignments
+fn iterate_over_cmd(cmd: Option<&Cmd>) {
+    if let Some(cmd) = cmd {
+        match &cmd.kind {
+            CmdKind::Assignment { name, expr } => {
+                println!("Assignment to variable: {}", name.ident.0);
+            }
+            CmdKind::Seq(command1, command2) => {
+                iterate_over_cmd(Some(command1));
+                iterate_over_cmd(Some(command2));
+            }
+            _ => {
+                println!("Other command encountered.");
+            }
+        }
+    } else {
+        // Handle the None case, if needed
+        println!("No command found (None).");
+    }
+}
+
+
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
 // a single assertion)
-fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
+fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
     match &cmd.kind {
         CmdKind::Assert { condition, .. } => Ok(IVLCmd::assert(condition, "Assert might fail!")),
         // Assume has not been documented in the report yet
         // Assume just takes the High level command Assume and passes the condition onto the assume IVL command
         // For the statement "assume true" the condition is "true" | for the statement "assume x == 2" the condition is "x == 2"
         CmdKind::Assume { condition, .. } => Ok(IVLCmd::assume(condition)),
+        CmdKind::Assume { condition, .. } => Ok(IVLCmd::assume(condition)),
         // Seq has not been documented in the report yet
         // Seq takes 2 commands in the higher level language (CmdKind) and passes them unto the IVLCmd seq
         // Note: the commands have to be processed as well, so that the IVL command seq does not pass on higer level commands
         CmdKind::Seq(command1, command2) => Ok(IVLCmd::seq(
-            &cmd_to_ivlcmd(command1)?,
-            &cmd_to_ivlcmd(command2)?,
+            &cmd_to_ivlcmd(command1, &method)?,
+            &cmd_to_ivlcmd(command2, &method)?,
         )),
         CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
+        CmdKind::Loop { invariants, variant, body }=>{
+            let invariantExpr=invariants_expression(invariants);
+
+            let cmd_case=body.cases.first().map(|case| &case.cmd);
+            
+            iterate_over_cmd(cmd_case);
+            // assert i
+            //ask ta what should we havoc here..
+            // havoc x
+            // assume i
+            
+
+            Ok(IVLCmd::nop())
+        },
+        CmdKind::Return { expr } => {
+            //ask ta ..
+            // should we assume that the programmer will return only at the end of the method?
+            let re_ensure = ensures_expressions(&method);
+            //first of all check  if the method is returning something
+            //if no ignore the return cmdKind
+            match expr {
+                Some(expr_value) => {
+                    //here i should find if there are ensures in the specifications
+                    //if yes then i should assert it else i should nop()
+                    if re_ensure.1 {
+                        // println!("in cmd to ivl");
+                        // println!("{:?}", &re_ensure.0.subst_result(expr_value));
+                        // println!("in cmd to ivl");
+                        //here re_ensure.0 is th expr that hold all ensures
+                        //my aim is to change the appearance of result by expr_value
+                        Ok(IVLCmd::assert(
+                            &re_ensure.0.subst_result(expr_value),
+                            "Ensures might fail!",
+                        ))
+                    } else {
+                        Ok(IVLCmd::nop())
+                    }
+                }
+                None => Ok(IVLCmd::nop()),
+            }
+
+            // Ok(IVLCmd::nop())
+        }
 
         CmdKind::VarDefinition {
             name,
@@ -98,7 +209,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
         } => {
             Ok(match expr {
                 Some(expr_value) => {
-                    // ask the ta
+                    // ask ta
                     //not sure if we should do the havoc before assign or assign is enough
                     //if we should perform the havoc before then IVLCmd::seq(&hav, &cmdd) should be called
                     //but then the wp of assign is implemented twice so we should fix the implementation
