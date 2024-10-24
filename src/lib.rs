@@ -204,17 +204,12 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32,Type)>) -> Re
             let expr = (variable_map.iter().fold(expr.clone(), |acc, (var, &(val, ref ty))| {
                 let new_ident = Ident(format!("{}{}", var, val));
                 let new_expr = Expr::ident(&new_ident, &ty.clone());
-                // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
                 acc.subst_ident(var, &new_expr)
             }));
+            
             let new_name = &Name::ident(update_variable_name(&name.ident, variable_map, expr.ty.clone()));
-            let assign = IVLCmd::assign(new_name
-                ,
-                &expr,
-            );
-            let havoc_assign = IVLCmd::seq(&IVLCmd::havoc(new_name, &Type::Int), &assign);
-            // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
-            Ok(havoc_assign)
+            let command = IVLCmd::assume(&Expr::ident(&new_name.ident, &expr.ty).op(slang::ast::Op::Eq, &expr));
+            Ok(command)
         }
         // For assert we do the same as for assign except we only have an expression, not a new variable.
         // Iterate through the variable_map
@@ -227,7 +222,6 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32,Type)>) -> Re
                 .fold(condition.clone(), |acc, (var, &(val, ref ty))| {
                     let new_ident = Ident(format!("{}{}", var, val));
                     let new_expr = Expr::ident(&new_ident, &ty.clone());
-                    // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
                     acc.subst_ident(var, &new_expr)
                 });
                 Ok(IVLCmd::assert(&new_condition, &message.clone()))
@@ -243,7 +237,6 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32,Type)>) -> Re
                     .fold(condition.clone(), |acc, (var, &(val, ref ty))| {
                         let new_ident = Ident(format!("{}{}", var, val));
                         let new_expr = Expr::ident(&new_ident, &ty.clone());
-                        // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
                     acc.subst_ident(var, &new_expr)
                 })),
         )),
@@ -270,10 +263,8 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32,Type)>) -> Re
             // println!("name sent to IVLCmd::havoc: {:?}", name);
             // println!("type sent to IVLCmd::havoc: {:?}", &ty.clone());
             // println!("newname sent to IVLCmd::havoc: {:?}", &Name::ident(update_variable_name(&name.ident, variable_map)));
-            Ok(IVLCmd::havoc(
-                &Name::ident(update_variable_name(&name.ident, variable_map, ty.clone())),
-                &ty.clone(),
-            ))
+            update_variable_name(&name.ident, variable_map, ty.clone());
+            Ok(IVLCmd::assume(&Expr::bool(true)))
         }
         _ => todo!("Not supported (yet)."),
     }
@@ -307,18 +298,7 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
         )),
         //wp of havoc
         //the logic is true but we should make sure that span.Default() is true
-        IVLCmdKind::Havoc { name, ty } => Ok((
-            Expr::quantifier(
-                Quantifier::Forall,
-                &[Var {
-                    span: Span::default(),
-                    name: name.clone(),
-                    ty: (Span::default(), ty.clone()),
-                }],
-                postcon,
-            ),
-            "HERE".to_string(),
-        )),
+        IVLCmdKind::Havoc { name, ty } => unreachable!("Havoc should not be in the IVL command"),
         _ => todo!("Not supported (yet)."),
     }
 }
