@@ -1,16 +1,16 @@
 pub mod ivl;
 mod ivl_ext;
-use crate::slang::ast::Case;
 use itertools::fold;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use crate::slang::ast::Case;
 use ivl::{IVLCmd, IVLCmdKind};
 use slang::ast::{Cmd, CmdKind, Expr, ExprKind, Ident, Method, Name, Quantifier, Type, Var};
 use slang::Span;
 use slang_ui::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
-use std::thread;
 
 pub struct App;
 
@@ -47,33 +47,34 @@ impl slang_ui::Hook for App {
 
             print!("dsa: ");
             print!("{}", dsa.to_string());
+            let initial_vector = vec![(Expr::bool(true), "".to_string())];
             // Calculate obligation and error message (if obligation is not
             // verified)
-            for (oblig, msg) in wp(&dsa, &Expr::bool(true))? {
-                // Convert obligation to SMT expression
-                let soblig = oblig.smt()?;
+            for (oblig, msg) in swp(&dsa, initial_vector) {
 
-                // Run the following solver-related statements in a closed scope.
-                // That is, after exiting the scope, all assertions are forgotten
-                // from subsequent executions of the solver
-                solver.scope(|solver| {
-                    // Check validity of obligation
-                    solver.assert(!soblig.as_bool()?)?;
-                    // Run SMT solver on all current assertions
-                    match solver.check_sat()? {
-                        // If the obligations result not valid, report the error (on
-                        // the span in which the error happens)
-                        smtlib::SatResult::Sat => {
-                            cx.error(oblig.span, format!("{msg}"));
-                        }
-                        smtlib::SatResult::Unknown => {
-                            cx.warning(oblig.span, "{msg}: unknown sat result");
-                        }
-                        smtlib::SatResult::Unsat => (),
+            // Convert obligation to SMT expression
+            let soblig = oblig.smt()?;
+
+            // Run the following solver-related statements in a closed scope.
+            // That is, after exiting the scope, all assertions are forgotten
+            // from subsequent executions of the solver
+            solver.scope(|solver| {
+                // Check validity of obligation
+                solver.assert(!soblig.as_bool()?)?;
+                // Run SMT solver on all current assertions
+                match solver.check_sat()? {
+                    // If the obligations result not valid, report the error (on
+                    // the span in which the error happens)
+                    smtlib::SatResult::Sat => {
+                        cx.error(oblig.span, format!("{msg}"));
                     }
-                    Ok(())
-                })?;
-            }
+                    smtlib::SatResult::Unknown => {
+                        cx.warning(oblig.span, "{msg}: unknown sat result");
+                    }
+                    smtlib::SatResult::Unsat => (),
+                }
+                Ok(())
+            })?; }
         }
 
         Ok(())
@@ -221,22 +222,19 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
         CmdKind::Match { body } => {
             // Here, we create a start for the match, which we can use as an initial point for the fold function
             // The initial case is "Assume false;assert True"
-            let start = IVLCmd::seq(
-                &IVLCmd::assume(&Expr::bool(false)),
-                &IVLCmd::assert(&Expr::bool(true), "message"),
-            );
-            // Here we call the fold function, which takes the start and the cases from the match.
+            let start= IVLCmd::seq(&IVLCmd::assume(&Expr::bool(false)), &IVLCmd::assert(&Expr::bool(true), "message"));
+            // Here we call the fold function, which takes the start and the cases from the match. 
             // The fold function will iterate over the cases and create a command for each case, which is then combined with the previous command.
-            // The fold collects new cases with a NonDet command.
+            // The fold collects new cases with a NonDet command. 
             // With the initial command the fold output looks like this:
-            // Assume false ; assert true [] assume b1; c1 [] assume b2; c2 [] assume b3; c3
-            let command = body.cases.iter().fold(start, |acc: IVLCmd, case: &Case| {
+            // Assume false ; assert true [] assume b1; c1 [] assume b2; c2 [] assume b3; c3 
+            let command = body.cases.iter().fold(start , |acc: IVLCmd, case : &Case| {
                 let con = case.condition.clone();
                 let case_command = case.cmd.clone();
                 let assume = IVLCmd::assume(&con);
                 let cmd = cmd_to_ivlcmd(&case_command, &method).unwrap();
                 IVLCmd::nondet(&acc, &IVLCmd::seq(&assume, &cmd))
-                // Use reduce (Fold som ikke tager initial element)
+            // Use reduce (Fold som ikke tager initial element)
             });
             Ok(command)
         }
@@ -441,11 +439,54 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
                 postcon,
             ),
             "Havoc".to_string(),
+            
         )),
         IVLCmdKind::NonDet(command1, command2) => {
             let (wp1, _) = wp(command1, postcon)?;
             let (wp2, _) = wp(command2, postcon)?;
             Ok((wp1.and(&wp2), "NonDet".to_string()))
+        }
+        _ => todo!("Not supported (yet)."),
+    }
+}
+
+// Weakest precondition of (assert-only) IVL programs comprised of a single assertion
+fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)> {
+    match &ivl.kind {
+        IVLCmdKind::Assert { condition, message } => {
+            pc_msg_list.push((condition.clone(), message.clone()));
+            pc_msg_list
+        }
+        // Assume has not been documented in the report yet
+        // Here the wp of assume with the condition, C, takes the postcondition, G, and returns the weakest precondition:
+        // I.e. : wp[assume C](G) = C -> G
+        IVLCmdKind::Assume { condition } => {
+            for (pc, msg) in pc_msg_list.iter_mut() {
+                *pc = condition.clone().imp(&pc.clone());
+                *msg = msg.clone();
+            }
+            pc_msg_list
+        }
+        // Seq has not been documented in the report yet
+        // Here the wp of assume with the commands: command1 and command2 and the postcondition G returns the weakest precondition:
+        // I.e. : wp[command1;command2](G) = wp[command1]( wp[command2](G) )
+        IVLCmdKind::Seq(command1, command2) => 
+        {
+            let mut pc_msg_list = swp(command1, pc_msg_list);
+            let mut pc_msg_list = swp(command2, pc_msg_list);
+            pc_msg_list
+        }
+        //After the code is transformed to dsa
+        //we compute wp by assuming the assigment, for example if we have x:=3 we assume x==3
+        // (name==expr) ==> postcond
+        IVLCmdKind::Assignment { name, expr } => unreachable!("Assignment should not be here"),
+        //wp of havoc
+        //the logic is true but we should make sure that span.Default() is true
+        IVLCmdKind::Havoc { name, ty } => unreachable!("Havoc should not be here"),
+        IVLCmdKind::NonDet(command1, command2) => {
+            let pc_msg_list = swp(command1, pc_msg_list);
+            let pc_msg_list = swp(command2, pc_msg_list);
+            pc_msg_list
         }
         _ => todo!("Not supported (yet)."),
     }
