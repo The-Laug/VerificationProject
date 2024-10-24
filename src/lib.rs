@@ -9,6 +9,7 @@ use slang::ast::{Cmd, CmdKind, Expr, ExprKind, Ident, Name, Quantifier, Type, Va
 use slang::Span;
 use slang_ui::prelude::*;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
 
@@ -231,6 +232,11 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
 //         _ => todo!("Not supported (yet)."),
 //     }
 // }
+fn init_set() -> HashSet<Ident> {
+    HashSet::new()
+}
+
+//fn swp(ivl:IVLCmd, set:HashSet<Expr)
 
 // Initializing an empty hashmap
 fn init_map() -> HashMap<Ident, i32> {
