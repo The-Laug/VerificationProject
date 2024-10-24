@@ -126,13 +126,13 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
 // }
 
 // Initializing an empty hashmap
-fn init_map() -> HashMap<Ident, i32> {
+fn init_map() -> HashMap<Ident, (i32,Type)> {
     HashMap::new()
 }
 
-fn synchronize_cmd(com1: IVLCmd, map1: HashMap<Ident, i32>, map2: HashMap<Ident, i32>) -> IVLCmd {
-    for (key, value1) in map1 {
-        if let Some(&value2) = map2.get(&key) {
+fn synchronize_cmd(com1: IVLCmd, map1: HashMap<Ident, (i32,Type)>, map2: HashMap<Ident, (i32,Type)>) -> IVLCmd {
+    for (key, (value1, _)) in map1 {
+        if let Some(&(value2,_)) = map2.get(&key) {
             if value2 > value1 {
                 let new_ident = Ident(format!("{}{}", key, value2));
                 let old_ident = Ident(format!("{}{}", key, value1));
@@ -154,36 +154,38 @@ fn synchronize_cmd(com1: IVLCmd, map1: HashMap<Ident, i32>, map2: HashMap<Ident,
 
 // Maybe not sure
 fn update_variable_map(
-    variable_map: &mut HashMap<Ident, i32>,
-    map1: &HashMap<Ident, i32>,
-    map2: &HashMap<Ident, i32>,
+    variable_map: &mut HashMap<Ident, (i32,Type)>,
+    map1: &HashMap<Ident, (i32,Type)>,
+    map2: &HashMap<Ident, (i32,Type)>,
 ) {
     // Iterate over map1 and update variable_map
-    for (key, &value1) in map1.iter() {
-        let entry = variable_map.entry(key.clone()).or_insert(value1);
-        if value1 > *entry {
-            *entry = value1;
+    for (key, &(value1, ref type1)) in map1.iter() {
+        let entry = variable_map.entry(key.clone()).or_insert((value1, type1.clone()));
+        if value1 > entry.0 {
+            entry.0 = value1;
+            entry.1 = type1.clone();
         }
     }
 
     // Iterate over map2 and update variable_map
-    for (key, &value2) in map2.iter() {
-        let entry = variable_map.entry(key.clone()).or_insert(value2);
-        if value2 > *entry {
-            *entry = value2;
+    for (key, &(value2, ref type2)) in map2.iter() {
+        let entry = variable_map.entry(key.clone()).or_insert((value2, type2.clone()));
+        if value2 > entry.0 {
+            entry.0 = value2;
+            entry.1 = type2.clone();
         }
     }
 }
 
 // Updates a variable to the newest version according to the map
-fn update_variable_name(variable: &Ident, map: &mut HashMap<Ident, i32>) -> Ident {
+fn update_variable_name(variable: &Ident, map: &mut HashMap<Ident, (i32, Type)>, var_type: Type) -> Ident {
     // Check if the variable exists in the map
-    let counter = map.entry(variable.clone()).or_insert(0);
-    // If it does increase its value by 1, otherwise add it to the map.
-    *counter += 1;
+    let entry = map.entry(variable.clone()).or_insert((0, var_type.clone()));
+    // If it does, increase its value by 1
+    entry.0 += 1;
 
     // Return the new variable name with the counter
-    let new_variable_name = format!("{}{}", variable, counter);
+    let new_variable_name = format!("{}{}", variable.0, entry.0);
 
     // Create an Ident instance
     Ident(new_variable_name)
@@ -192,20 +194,20 @@ fn update_variable_name(variable: &Ident, map: &mut HashMap<Ident, i32>) -> Iden
 // Code to make IVL commands to DSA form (Dynamic Single Assignment)
 // This code works by creating a map variable_map, which keeps track of all the variables and maps them to the number of times they occur in the program.
 // Using the variable_map, we can change the name of each of the variables, to the variablename concatenated with the number.
-fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IVLCmd> {
+fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32,Type)>) -> Result<IVLCmd> {
     match &ivl.kind {
         // For each of the variables in the variable_map we check whether the variable occurs in the expression (rhs of the assignment)
         // If the variable occur, we change it with the value found in the map (ie. "x" becomes "x5" etc.) and we look for the next variable in the variable_map.
         // Then we look for the variable which gets assigned (the lhs of the assignment) and updates it in the variable_map (see definition of update_variable_name)
         // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
         IVLCmdKind::Assignment { name, expr } => {
-            let expr = (variable_map.iter().fold(expr.clone(), |acc, (var, &val)| {
+            let expr = (variable_map.iter().fold(expr.clone(), |acc, (var, &(val, ref ty))| {
                 let new_ident = Ident(format!("{}{}", var, val));
-                let new_expr = Expr::ident(&new_ident, &Type::Int);
+                let new_expr = Expr::ident(&new_ident, &ty.clone());
                 // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
                 acc.subst_ident(var, &new_expr)
             }));
-            let new_name = &Name::ident(update_variable_name(&name.ident, variable_map));
+            let new_name = &Name::ident(update_variable_name(&name.ident, variable_map, expr.ty.clone()));
             let assign = IVLCmd::assign(new_name
                 ,
                 &expr,
@@ -222,9 +224,9 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
         IVLCmdKind::Assert { condition, message } => {
             let new_condition = variable_map
                 .iter()
-                .fold(condition.clone(), |acc, (var, &val)| {
+                .fold(condition.clone(), |acc, (var, &(val, ref ty))| {
                     let new_ident = Ident(format!("{}{}", var, val));
-                    let new_expr = Expr::ident(&new_ident, &Type::Int);
+                    let new_expr = Expr::ident(&new_ident, &ty.clone());
                     // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
                     acc.subst_ident(var, &new_expr)
                 });
@@ -238,9 +240,9 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
             IVLCmdKind::Assume { condition } => Ok(IVLCmd::assume(
                 &(variable_map
                     .iter()
-                    .fold(condition.clone(), |acc, (var, &val)| {
+                    .fold(condition.clone(), |acc, (var, &(val, ref ty))| {
                         let new_ident = Ident(format!("{}{}", var, val));
-                        let new_expr = Expr::ident(&new_ident, &Type::Int);
+                        let new_expr = Expr::ident(&new_ident, &ty.clone());
                         // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
                     acc.subst_ident(var, &new_expr)
                 })),
@@ -269,7 +271,7 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
             // println!("type sent to IVLCmd::havoc: {:?}", &ty.clone());
             // println!("newname sent to IVLCmd::havoc: {:?}", &Name::ident(update_variable_name(&name.ident, variable_map)));
             Ok(IVLCmd::havoc(
-                &Name::ident(update_variable_name(&name.ident, variable_map)),
+                &Name::ident(update_variable_name(&name.ident, variable_map, ty.clone())),
                 &ty.clone(),
             ))
         }
