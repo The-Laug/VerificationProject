@@ -3,9 +3,9 @@ mod ivl_ext;
 use itertools::fold;
 use std::sync::{Arc, Mutex};
 use std::thread;
-
+use crate::slang::ast::Case;
 use ivl::{IVLCmd, IVLCmdKind};
-use slang::ast::{Cmd, CmdKind, Expr, ExprKind, Ident, Name, Quantifier, Type, Var, Method};
+use slang::ast::{Cmd, CmdKind, Expr, ExprKind, Ident, Method, Name, Quantifier, Type, Var};
 use slang::Span;
 use slang_ui::prelude::*;
 use std::collections::HashMap;
@@ -36,10 +36,9 @@ impl slang_ui::Hook for App {
             // Get method's body
             let cmd = &m.body.clone().unwrap().cmd;
 
-                        // println!("in analyze");
-                        // println!("{:?}", (m));
-                        // println!("in analyze");
-
+            // println!("in analyze");
+            // println!("{:?}", (m));
+            // println!("in analyze");
 
             // Encode it in IVL
             let ivl = cmd_to_ivlcmd(cmd, &m)?;
@@ -80,8 +79,6 @@ impl slang_ui::Hook for App {
     }
 }
 
-
-
 //related to core A
 //in this method i am returning all ensures expressions as 1 expr and between each there is and
 fn ensures_expressions(method: &Method) -> (Expr, bool) {
@@ -90,11 +87,9 @@ fn ensures_expressions(method: &Method) -> (Expr, bool) {
     let mut ensures_iter = method.ensures();
     let has_ensures = ensures_iter.next().is_some(); // true if there is at least one expression
 
-
     for ens in method.ensures() {
         let expr = ens.clone();
         ens_exp = Expr::and(&ens_exp, &expr);
-       
     }
 
     (ens_exp, has_ensures)
@@ -135,7 +130,6 @@ fn iterate_over_cmd(cmd: Option<&Cmd>) {
     }
 }
 
-
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
 // a single assertion)
 fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
@@ -154,20 +148,23 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             &cmd_to_ivlcmd(command2, &method)?,
         )),
         CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
-        CmdKind::Loop { invariants, variant, body }=>{
-            let invariantExpr=invariants_expression(invariants);
+        CmdKind::Loop {
+            invariants,
+            variant,
+            body,
+        } => {
+            let invariantExpr = invariants_expression(invariants);
 
-            let cmd_case=body.cases.first().map(|case| &case.cmd);
-            
+            let cmd_case = body.cases.first().map(|case| &case.cmd);
+
             iterate_over_cmd(cmd_case);
             // assert i
             //ask ta what should we havoc here..
             // havoc x
             // assume i
-            
 
             Ok(IVLCmd::nop())
-        },
+        }
         CmdKind::Return { expr } => {
             //ask ta ..
             // should we assume that the programmer will return only at the end of the method?
@@ -218,6 +215,21 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                 }
                 None => IVLCmd::havoc(name, ty),
             })
+        }
+
+        CmdKind::Match { body } => {
+            // Assuming `body` is of type `Cases` and `Cases` is a vector of `Case`
+            let start= IVLCmd::seq(&IVLCmd::assume(&Expr::bool(false)), &IVLCmd::assert(&Expr::bool(true), "message"));
+            let command = body.cases.iter().fold(start , |acc: IVLCmd, case : &Case| {
+                let con = case.condition.clone();
+                let case_command = case.cmd.clone();
+                println!("Processing case: {:?}", case);
+                let assume = IVLCmd::assume(&con);
+                let cmd = cmd_to_ivlcmd(&case_command, &method).unwrap();
+                IVLCmd::nondet(&acc, &IVLCmd::seq(&assume, &cmd))
+
+            });
+            Ok(command)
         }
 
         _ => todo!("Not supported (yet)."),
@@ -313,10 +325,7 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
                 acc.subst_ident(var, &new_expr)
             }));
             let new_name = &Name::ident(update_variable_name(&name.ident, variable_map));
-            let assign = IVLCmd::assign(new_name
-                ,
-                &expr,
-            );
+            let assign = IVLCmd::assign(new_name, &expr);
             let havoc_assign = IVLCmd::seq(&IVLCmd::havoc(new_name, &Type::Int), &assign);
             // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
             Ok(havoc_assign)
@@ -335,20 +344,20 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
                     // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
                     acc.subst_ident(var, &new_expr)
                 });
-                Ok(IVLCmd::assert(&new_condition, &message.clone()))
-            }
-            // For assume we do the same as for assign except we only have an expression, not a new variable.
-            // Iterate through the variable_map
-            // For each variable look for and change the variable for the appropriate value
-            // Continue with the rest of the map
-            // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
-            IVLCmdKind::Assume { condition } => Ok(IVLCmd::assume(
-                &(variable_map
-                    .iter()
-                    .fold(condition.clone(), |acc, (var, &val)| {
-                        let new_ident = Ident(format!("{}{}", var, val));
-                        let new_expr = Expr::ident(&new_ident, &Type::Int);
-                        // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
+            Ok(IVLCmd::assert(&new_condition, &message.clone()))
+        }
+        // For assume we do the same as for assign except we only have an expression, not a new variable.
+        // Iterate through the variable_map
+        // For each variable look for and change the variable for the appropriate value
+        // Continue with the rest of the map
+        // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
+        IVLCmdKind::Assume { condition } => Ok(IVLCmd::assume(
+            &(variable_map
+                .iter()
+                .fold(condition.clone(), |acc, (var, &val)| {
+                    let new_ident = Ident(format!("{}{}", var, val));
+                    let new_expr = Expr::ident(&new_ident, &Type::Int);
+                    // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
                     acc.subst_ident(var, &new_expr)
                 })),
         )),
