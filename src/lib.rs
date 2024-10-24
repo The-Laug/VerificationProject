@@ -32,9 +32,9 @@ impl slang_ui::Hook for App {
             // Get method's body
             let cmd = &m.body.clone().unwrap().cmd;
 
-            // println!("in cmd to ivl");
-            //             println!("{:?}", (m));
-            //             println!("in cmd to ivl");
+                        // println!("in analyze");
+                        // println!("{:?}", (m));
+                        // println!("in analyze");
 
 
             // Encode it in IVL
@@ -71,19 +71,9 @@ impl slang_ui::Hook for App {
     }
 }
 
-// //in this method i am returning all require expressions as 1 assume and between each there is and
-// fn requires_expressions(method: &Method) -> Cmd {
-//     let mut req_exp = Expr::bool(true);
 
-//     // Combine all requires expressions into a single expression using AND
-//     for req in method.requires() {
-//         let expr = req.clone();
-//         req_exp = Expr::and(&req_exp, &expr);
-//     }
 
-//     Cmd::assume(&req_exp)
-// }
-
+//related to core A
 //in this method i am returning all ensures expressions as 1 expr and between each there is and
 fn ensures_expressions(method: &Method) -> (Expr, bool) {
     let mut ens_exp = Expr::bool(true);
@@ -99,6 +89,19 @@ fn ensures_expressions(method: &Method) -> (Expr, bool) {
     }
 
     (ens_exp, has_ensures)
+}
+
+//related to core B
+//in this method i am returning all invariants expressions as 1 expr and between each there is and
+fn invariants_expression(invariants: &Vec<Expr>) -> Expr {
+    let mut in_exp = Expr::bool(true);
+
+    for ens in invariants {
+        let expr = ens.clone();
+        in_exp = Expr::and(&in_exp, &expr);
+    }
+
+    in_exp
 }
 
 
@@ -120,9 +123,26 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             &cmd_to_ivlcmd(command2, &method)?,
         )),
         CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
+        CmdKind::Loop { invariants, variant, body }=>{
+            let invariantExpr=invariants_expression(invariants);
+
+            let cmd_case=body.cases.first().map(|case| &case.cmd);
+            println!("in cmd to ivl");
+                        println!("{:?}", cmd_case);
+                        println!("in cmd to ivl");
+            // assert i
+            //ask ta what should we havoc here..
+            // havoc x
+            // assume i
+            
+
+            Ok(IVLCmd::nop())
+        },
         CmdKind::Return { expr } => {
+            //ask ta ..
+            // should we assume that the programmer will return only at the end of the method?
             let re_ensure = ensures_expressions(&method);
-            //first of all check if the method is returning something
+            //first of all check  if the method is returning something
             //if no ignore the return cmdKind
             match expr {
                 Some(expr_value) => {
@@ -155,7 +175,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
         } => {
             Ok(match expr {
                 Some(expr_value) => {
-                    // ask the ta
+                    // ask ta
                     //not sure if we should do the havoc before assign or assign is enough
                     //if we should perform the havoc before then IVLCmd::seq(&hav, &cmdd) should be called
                     //but then the wp of assign is implemented twice so we should fix the implementation
