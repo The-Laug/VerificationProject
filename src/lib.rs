@@ -205,10 +205,14 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
                 // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
                 acc.subst_ident(var, &new_expr)
             }));
-            Ok(IVLCmd::assign(
-                &Name::ident(update_variable_name(&name.ident, variable_map)),
+            let new_name = &Name::ident(update_variable_name(&name.ident, variable_map));
+            let assign = IVLCmd::assign(new_name
+                ,
                 &expr,
-            ))
+            );
+            let havoc_assign = IVLCmd::seq(&IVLCmd::havoc(new_name, &Type::Int), &assign);
+            // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
+            Ok(havoc_assign)
         }
         // For assert we do the same as for assign except we only have an expression, not a new variable.
         // Iterate through the variable_map
@@ -224,19 +228,20 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
                     // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
                     acc.subst_ident(var, &new_expr)
                 });
-            Ok(IVLCmd::assert(&new_condition, &message.clone()))
-        }
-        // For assume we do the same as for assign except we only have an expression, not a new variable.
-        // Iterate through the variable_map
-        // For each variable look for and change the variable for the appropriate value
-        // Continue with the rest of the map
-        // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
-        IVLCmdKind::Assume { condition } => Ok(IVLCmd::assume(
-            &(variable_map
-                .iter()
-                .fold(condition.clone(), |acc, (var, &val)| {
-                    let new_ident = Ident(format!("{}{}", var, val));
-                    let new_expr = Expr::ident(&new_ident, &acc.ty);
+                Ok(IVLCmd::assert(&new_condition, &message.clone()))
+            }
+            // For assume we do the same as for assign except we only have an expression, not a new variable.
+            // Iterate through the variable_map
+            // For each variable look for and change the variable for the appropriate value
+            // Continue with the rest of the map
+            // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
+            IVLCmdKind::Assume { condition } => Ok(IVLCmd::assume(
+                &(variable_map
+                    .iter()
+                    .fold(condition.clone(), |acc, (var, &val)| {
+                        let new_ident = Ident(format!("{}{}", var, val));
+                        let new_expr = Expr::ident(&new_ident, &Type::Int);
+                        // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
                     acc.subst_ident(var, &new_expr)
                 })),
         )),
