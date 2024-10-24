@@ -1,0 +1,3 @@
+Obligation: forall z1: Int :: ((z2 == 2) ==> true)
+Message: SEQ
+Spre: true
