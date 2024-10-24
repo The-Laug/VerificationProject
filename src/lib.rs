@@ -5,15 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use ivl::{IVLCmd, IVLCmdKind};
-use slang::ast::{Cmd, CmdKind, Expr, ExprKind, Ident, Name, Quantifier, Type, Var};
-use slang::ast::{Cmd, CmdKind, Expr, Method, Quantifier, Type, Var};
+use slang::ast::{Cmd, CmdKind, Expr, ExprKind, Ident, Name, Quantifier, Type, Var, Method};
 use slang::Span;
 use slang_ui::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
-use std::thread;
 
 pub struct App;
 
@@ -46,7 +43,6 @@ impl slang_ui::Hook for App {
 
             // Encode it in IVL
             let ivl = cmd_to_ivlcmd(cmd, &m)?;
-            let ivl = cmd_to_ivlcmd(cmd)?;
             // Convert IVL to DSA
             let dsa = ivl_to_dsa(&ivl, &mut init_map())?;
 
@@ -426,8 +422,13 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
                 }],
                 postcon,
             ),
-            "HERE".to_string(),
+            "Havoc".to_string(),
         )),
+        IVLCmdKind::NonDet(command1, command2) => {
+            let (wp1, _) = wp(command1, postcon)?;
+            let (wp2, _) = wp(command2, postcon)?;
+            Ok((wp1.and(&wp2), "NonDet".to_string()))
+        }
         _ => todo!("Not supported (yet)."),
     }
 }
