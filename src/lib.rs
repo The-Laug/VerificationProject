@@ -342,13 +342,21 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32, Type)>) -> R
         // Then we look for the variable which gets assigned (the lhs of the assignment) and updates it in the variable_map (see definition of update_variable_name)
         // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
         IVLCmdKind::Assignment { name, expr } => {
-            let expr = (variable_map
+            println!("Assignment before substitution, span: {}-{}", expr.span.start(), expr.span.end());
+
+            let original_span = expr.span.clone();
+
+            let mut expr = (variable_map
                 .iter()
                 .fold(expr.clone(), |acc, (var, &(val, ref ty))| {
                     let new_ident = Ident(format!("{}{}", var, val));
                     let new_expr = Expr::ident(&new_ident, &ty.clone());
                     acc.subst_ident(var, &new_expr)
                 }));
+            
+            expr.span = original_span;
+            println!("Assignment after substitution, span: {}-{}", expr.span.start(), expr.span.end());
+
 
             let new_name = &Name::ident(update_variable_name(
                 &name.ident,
@@ -366,7 +374,11 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32, Type)>) -> R
         // Continue with the rest of the map
         // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
         IVLCmdKind::Assert { condition, message } => {
-            let new_condition =
+            println!("Assert before substitution, span: {}-{}", condition.span.start(), condition.span.end());
+
+            let original_span = condition.span.clone();
+
+            let mut new_condition =
                 variable_map
                     .iter()
                     .fold(condition.clone(), |acc, (var, &(val, ref ty))| {
@@ -374,6 +386,10 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32, Type)>) -> R
                         let new_expr = Expr::ident(&new_ident, &ty.clone());
                         acc.subst_ident(var, &new_expr)
                     });
+            
+            new_condition.span = original_span;
+            println!("Assert after substitution, span: {}-{}", new_condition.span.start(), new_condition.span.end());
+
             Ok(IVLCmd::assert(&new_condition, &message.clone()))
         }
         // For assume we do the same as for assign except we only have an expression, not a new variable.
@@ -457,7 +473,22 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
 fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)> {
     match &ivl.kind {
         IVLCmdKind::Assert { condition, message } => {
+            // Print the condition and message before pushing to pc_msg_list
+            println!("Assert encountered:");
+            println!("Condition: {}", condition.to_string());  // Print the condition as a string
+            println!("Message: {}", message);                 // Print the associated message
+            println!("Span start: {}", condition.span.start());
+            println!("Span end: {}", condition.span.end());
+
+            // Push the condition and message into pc_msg_list
             pc_msg_list.push((condition.clone(), message.clone()));
+
+            // Print the updated pc_msg_list to verify it has been added correctly
+            println!("Updated pc_msg_list:");
+            for (i, (pc, msg)) in pc_msg_list.iter().enumerate() {
+                println!("  Entry {}: Condition: {}, Message: {}", i + 1, pc.to_string(), msg);
+            }
+
             pc_msg_list
         }
         // Assume has not been documented in the report yet
@@ -465,10 +496,23 @@ fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)
         // I.e. : wp[assume C](G) = C -> G
         IVLCmdKind::Assume { condition } => {
             for (pc, msg) in pc_msg_list.iter_mut() {
-                *pc = condition.clone().imp(&pc.clone());
-                *msg = msg.clone();
-                print!("HERE");
-                print!("{}", pc.to_string());
+                // Print the initial state of pc, msg, and its span
+                println!("Assume Encountered, Before implication:");
+                println!("Condition (pc): {}", pc.to_string());
+                println!("Message: {}", msg);
+                println!("Span start: {}", pc.span.start());
+                println!("Span end: {}", pc.span.end());
+        
+                // Apply the implication
+                let updated_pc = condition.clone().imp(pc);
+                *pc = updated_pc.with_span(pc.span);  // Ensure the span of `pc` is preserved
+                
+                // Print the modified state of pc after the implication
+                println!("After implication:");
+                println!("Condition (pc): {}", pc.to_string());
+                println!("Message: {}", msg);
+                println!("Span start: {}", pc.span.start());
+                println!("Span end: {}", pc.span.end());
             }
             pc_msg_list
         }
@@ -476,8 +520,9 @@ fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)
         // Here the wp of assume with the commands: command1 and command2 and the postcondition G returns the weakest precondition:
         // I.e. : wp[command1;command2](G) = wp[command1]( wp[command2](G) )
         IVLCmdKind::Seq(command1, command2) => {
-            let mut pc_msg_list = swp(command1, pc_msg_list);
-            let mut pc_msg_list = swp(command2, pc_msg_list);
+            // The order is important as we need it to be bottom up for swp in order to apply the assumptions correctly.
+            let pc_msg_list = swp(command2, pc_msg_list);
+            let pc_msg_list = swp(command1, pc_msg_list);
             pc_msg_list
         }
         //After the code is transformed to dsa
@@ -488,9 +533,15 @@ fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)
         //the logic is true but we should make sure that span.Default() is true
         IVLCmdKind::Havoc { name, ty } => unreachable!("Havoc should not be here"),
         IVLCmdKind::NonDet(command1, command2) => {
-            let pc_msg_list = swp(command1, pc_msg_list);
-            let pc_msg_list = swp(command2, pc_msg_list);
-            pc_msg_list
+            // Clone the current pc_msg_list to apply swp to each command independently
+            let pc_msg_list1 = swp(command1, pc_msg_list.clone());
+            let pc_msg_list2 = swp(command2, pc_msg_list);
+
+            // Combine both lists into a single list to represent non-deterministic choice
+            let mut combined_pc_msg_list = pc_msg_list1;
+            combined_pc_msg_list.extend(pc_msg_list2);
+
+            combined_pc_msg_list
         }
         _ => todo!("Not supported (yet)."),
     }
