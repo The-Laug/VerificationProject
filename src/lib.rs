@@ -42,11 +42,24 @@ impl slang_ui::Hook for App {
             //if this is the case add the ensures as a post condition
             //if there is return then it will be encoded in the Return encoding.
             if !contains_return(&m) {
-                let ensure = ensures_expressions(&m);
-                if ensure.1 {
-                    //it looks  a lot of statements to do simple thing but it worked
-                    let new_cmd = Cmd::assert(&ensure.0, "ensure may fail");
-                    let c = Box::new(new_cmd.clone());
+                let re_ensure = ensures_expressions2(&m);
+                if re_ensure.1 {
+                    //The ivl that i want to return at the end
+                    let mut cmdd;
+
+                    //if we have only one ensure we are returning ...
+                    if re_ensure.0.len() == 1 {
+                        cmdd = Cmd::assert(&re_ensure.0[0], "Ensures might fail!");
+                    } else {
+                        cmdd = Cmd::assert(&re_ensure.0[0], "Ensures might fail!");
+
+                        for expr in &re_ensure.0[1..] {
+                            let cmd = Cmd::assert(&expr, "Ensures might fail!");
+                            cmdd = cmdd.seq(&cmd)
+                        }
+                    }
+
+                    let c = Box::new(cmdd.clone());
                     let k = Box::new(cmd.seq(&c));
                     let h: &Box<Cmd> = &k;
                     ivl = cmd_to_ivlcmd(h, &m)?;
@@ -62,7 +75,7 @@ impl slang_ui::Hook for App {
             // Calculate obligation and error message (if obligation is not
             // verified)
             for (oblig, msg) in swp(&dsa, initial_vector) {
-                // println!("{:?}", initial_vector.clone());             
+                // println!("{:?}", initial_vector.clone());
                 let soblig = oblig.smt()?;
 
                 // Run the following solver-related statements in a closed scope.
@@ -113,18 +126,33 @@ fn check_cmd_for_return(cmd: &Cmd) -> bool {
 
 //related to core A
 //in this method i am returning all ensures expressions as 1 expr and between each there is and
-fn ensures_expressions(method: &Method) -> (Expr, bool) {
-    let mut ens_exp = Expr::bool(true);
+// fn ensures_expressions(method: &Method) -> (Expr, bool) {
+//     let mut ens_exp = Expr::bool(true);
+
+//     let mut ensures_iter = method.ensures();
+//     let has_ensures = ensures_iter.next().is_some(); // true if there is at least one expression
+
+//     for ens in method.ensures() {
+//         let expr = ens.clone();
+//         ens_exp = Expr::and(&ens_exp, &expr);
+//     }
+
+//     (ens_exp, has_ensures)
+// }
+
+//related to core A
+//in this method i am returning all ensures expressions as 1 expr and between each there is and
+fn ensures_expressions2(method: &Method) -> (Vec<Expr>, bool) {
+    let mut exprs = Vec::new(); // Initialize an empty Vec<Expr>
 
     let mut ensures_iter = method.ensures();
     let has_ensures = ensures_iter.next().is_some(); // true if there is at least one expression
 
     for ens in method.ensures() {
-        let expr = ens.clone();
-        ens_exp = Expr::and(&ens_exp, &expr);
+        exprs.push(ens.clone()); // Push each Expr into the Vec
     }
 
-    (ens_exp, has_ensures)
+    (exprs, has_ensures)
 }
 
 //related to core B
@@ -219,7 +247,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             variant,
             body,
         } => {
-            //first we need to do 
+            //first we need to do
             // assert I ;
             //  havoc x;
             //  assume I
@@ -232,15 +260,12 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             let modified_variables = collect_var_definitions(&body);
             //The above variables should be connected in some way
 
-
             // the cases of the loop should be handled as match
 
             Ok(IVLCmd::nop())
         }
         CmdKind::Return { expr } => {
-            //ask ta ..
-            // should we assume that the programmer will return only at the end of the method?
-            let re_ensure = ensures_expressions(&method);
+            let re_ensure = ensures_expressions2(&method);
             //first of all check  if the method is returning something
             //if no ignore the return cmdKind
             match expr {
@@ -248,15 +273,41 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                     //here i should find if there are ensures in the specifications
                     //if yes then i should assert it else i should nop()
                     if re_ensure.1 {
-                        // println!("in cmd to ivl");
-                        // println!("{:?}", &re_ensure.0.subst_result(expr_value));
-                        // println!("in cmd to ivl");
-                        //here re_ensure.0 is th expr that hold all ensures
-                        //my aim is to change the appearance of result by expr_value
-                        Ok(IVLCmd::assert(
-                            &re_ensure.0.subst_result(expr_value),
-                            "Ensures might fail!",
-                        ))
+                        //The ivl that i want to return at the end
+                        let mut ivlcmd;
+
+                        //if we have only one ensure we are returning the assert of it
+                        //and subs the result by expr_value
+                        if re_ensure.0.len() == 1 {
+                            let x = &re_ensure.0[0].span;
+                            ivlcmd = IVLCmd::assert(
+                                &re_ensure.0[0].subst_result(expr_value).with_span(x.clone()),
+                                "Ensures might fail!",
+                            );
+                        } else {
+                            //if we have more than one ensure we are returning them as seq of the assert od each
+                            //and subs the result by expr_value
+                            //we are using the with_span because subst_result is making changes on the span
+                            let s = &re_ensure.0[0].span;
+                            //i am taking the first item in the vec as first ivl and then iterating on the rest
+                            //inorder to connect them using seq
+                            ivlcmd = IVLCmd::assert(
+                                &re_ensure.0[0].subst_result(expr_value).with_span(s.clone()),
+                                "Ensures might fail!",
+                            );
+
+                            for expr in &re_ensure.0[1..] {
+                                // Slice starting from the second item
+                                let x = &expr.span;
+                                let ivl = IVLCmd::assert(
+                                    &expr.subst_result(expr_value).with_span(x.clone()),
+                                    "Ensures might fail!",
+                                );
+                                ivlcmd = ivlcmd.seq(&ivl)
+                            }
+                        }
+
+                        Ok(ivlcmd)
                     } else {
                         Ok(IVLCmd::nop())
                     }
@@ -474,21 +525,29 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32, Type)>) -> R
         // Then we look for the variable which gets assigned (the lhs of the assignment) and updates it in the variable_map (see definition of update_variable_name)
         // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
         IVLCmdKind::Assignment { name, expr } => {
-            println!("Assignment before substitution, span: {}-{}", expr.span.start(), expr.span.end());
+            println!(
+                "Assignment before substitution, span: {}-{}",
+                expr.span.start(),
+                expr.span.end()
+            );
 
             let original_span = expr.span.clone();
 
-            let mut expr = (variable_map
-                .iter()
-                .fold(expr.clone(), |acc, (var, &(val, ref ty))| {
-                    let new_ident = Ident(format!("{}{}", var, val));
-                    let new_expr = Expr::ident(&new_ident, &ty.clone());
-                    acc.subst_ident(var, &new_expr)
-                }));
-            
-            expr.span = original_span;
-            println!("Assignment after substitution, span: {}-{}", expr.span.start(), expr.span.end());
+            let mut expr =
+                (variable_map
+                    .iter()
+                    .fold(expr.clone(), |acc, (var, &(val, ref ty))| {
+                        let new_ident = Ident(format!("{}{}", var, val));
+                        let new_expr = Expr::ident(&new_ident, &ty.clone());
+                        acc.subst_ident(var, &new_expr)
+                    }));
 
+            expr.span = original_span;
+            println!(
+                "Assignment after substitution, span: {}-{}",
+                expr.span.start(),
+                expr.span.end()
+            );
 
             let new_name = &Name::ident(update_variable_name(
                 &name.ident,
@@ -506,7 +565,11 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32, Type)>) -> R
         // Continue with the rest of the map
         // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
         IVLCmdKind::Assert { condition, message } => {
-            println!("Assert before substitution, span: {}-{}", condition.span.start(), condition.span.end());
+            println!(
+                "Assert before substitution, span: {}-{}",
+                condition.span.start(),
+                condition.span.end()
+            );
 
             let original_span = condition.span.clone();
 
@@ -518,9 +581,13 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32, Type)>) -> R
                         let new_expr = Expr::ident(&new_ident, &ty.clone());
                         acc.subst_ident(var, &new_expr)
                     });
-            
+
             new_condition.span = original_span;
-            println!("Assert after substitution, span: {}-{}", new_condition.span.start(), new_condition.span.end());
+            println!(
+                "Assert after substitution, span: {}-{}",
+                new_condition.span.start(),
+                new_condition.span.end()
+            );
 
             Ok(IVLCmd::assert(&new_condition, &message.clone()))
         }
@@ -605,16 +672,18 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
 fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)> {
     match &ivl.kind {
         IVLCmdKind::Assert { condition, message } => {
-    
-         
-
             // Push the condition and message into pc_msg_list
             pc_msg_list.push((condition.clone(), message.clone()));
 
             // Print the updated pc_msg_list to verify it has been added correctly
             println!("Updated pc_msg_list:");
             for (i, (pc, msg)) in pc_msg_list.iter().enumerate() {
-                println!("  Entry {}: Condition: {}, Message: {}", i + 1, pc.to_string(), msg);
+                println!(
+                    "  Entry {}: Condition: {}, Message: {}",
+                    i + 1,
+                    pc.to_string(),
+                    msg
+                );
             }
 
             pc_msg_list
@@ -624,11 +693,9 @@ fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)
         // I.e. : wp[assume C](G) = C -> G
         IVLCmdKind::Assume { condition } => {
             for (pc, msg) in pc_msg_list.iter_mut() {
-        
                 // Apply the implication
                 let updated_pc = condition.clone().imp(pc);
-                *pc = updated_pc.with_span(pc.span);  // Ensure the span of `pc` is preserved
-                
+                *pc = updated_pc.with_span(pc.span); // Ensure the span of `pc` is preserved
             }
             pc_msg_list
         }
