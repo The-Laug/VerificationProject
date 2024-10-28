@@ -174,6 +174,29 @@ fn collect_var_definitions(cases: &Cases) -> Vec<Cmd> {
     var_definitions
 }
 
+
+fn collect_variables_from_assignments_in_loop_body(com:Cmd) ->Vec<(Name,Type)> {
+    let mut variables = Vec::new();
+    match &com.kind {
+        CmdKind::Assignment { name, expr } => {
+            variables.push((name.clone(), expr.ty.clone()));
+        }
+        CmdKind::Seq(command1, command2) => {
+            let mut variables1 = collect_variables_from_assignments_in_loop_body(*command1.clone());
+            let mut variables2 = collect_variables_from_assignments_in_loop_body(*command2.clone());
+            variables.append(&mut variables1);
+            variables.append(&mut variables2);
+        }
+        _ => todo!("Not supported (yet)."),
+    }
+    variables
+}  
+
+// Creates sequence of IVL commands from a vector of IVL commands
+fn sequence_from_vec(vec: Vec<IVLCmd>) -> IVLCmd {
+    vec.iter().fold(IVLCmd::nop(), |acc, cmd| IVLCmd::seq(&acc, cmd))
+}
+
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
 // a single assertion)
 fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
@@ -288,10 +311,72 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             });
             Ok(command)
         }
+        CmdKind::Loop { invariants, variant, body } => {
+            let sequence_of_invariant_assertions = invariants.iter().fold(IVLCmd::nop(), |acc, inv| {
+                IVLCmd::seq(&acc, &IVLCmd::assert(inv, "Invariant might fail!"))
+            });
+            // initializing vector
+            let mut vec_of_modified_variables = Vec::new();
+            // Append modified variables from body to the vector vec_of_modified_variables
+            for case in body.cases.iter() {
+                let vars =collect_variables_from_assignments_in_loop_body(case.cmd.clone());
+                // Add all elements from vars to vec_of_modified_variables
+                vec_of_modified_variables.extend(vars);
+            }
+
+
+            // Create havoc commands for each variable in vec_of_modified_variables
+            let sequence_of_havoc_commands = vec_of_modified_variables.iter().fold(IVLCmd::nop(), |acc, (var_name,var_type)| {
+                IVLCmd::seq(&acc, &IVLCmd::havoc(&var_name, &var_type))
+            });
+            // Create a sequence of assumptions for each invariant
+            let sequence_of_invariant_assumptions = invariants.iter().fold(IVLCmd::nop(), |acc, inv| {
+                IVLCmd::seq(&acc, &IVLCmd::assume(inv))
+            });
+
+            // Create a match statement for each case in cases
+            let sequence_of_cases = body.cases.iter().fold(IVLCmd::nop(), |acc, case| {
+                let condition = case.condition.clone();
+                let command = case.cmd.clone();
+                let assume = IVLCmd::assume(&condition);
+                let cmd = cmd_to_ivlcmd(&command, &method).unwrap();
+                let seq = IVLCmd::seq(&assume, &cmd);
+                let first_seq = IVLCmd::seq(&seq, &sequence_of_invariant_assertions);
+                let assume_false = IVLCmd::assume(&Expr::bool(false));
+                let sequence = IVLCmd::seq( &first_seq,&assume_false);
+                IVLCmd::nondet(&acc, &sequence)
+            });
+
+            
+            // Creating vector of all the commands
+            let mut all_commands = vec![
+                sequence_of_invariant_assertions,
+                sequence_of_havoc_commands,
+                sequence_of_invariant_assumptions,
+                sequence_of_cases,
+                ];
+                
+            // Combine all the commands into a single command with sequences
+            let final_command = sequence_from_vec(all_commands);
+            
+            Ok(final_command)
+
+        }
 
         _ => todo!("Not supported (yet)."),
     }
 }
+
+// assert I; 
+// havoc z̅; 
+// assume I; // (1) re-declarations gone, assumption changed
+// if (b) {
+//   enc(C); // encoding of C 
+//   assert I; // fails if I is not an invariant
+//   assume false // (2) discard remaining execution steps 
+// } else {
+//   skip
+// }
 
 // Code to substitute variables in an expressions, to make the IVL commands into DSA
 // fn sub_new_var(expr:Expr) -> Result<Expr>{
