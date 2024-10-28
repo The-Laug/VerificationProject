@@ -202,6 +202,29 @@ fn collect_var_definitions(cases: &Cases) -> Vec<Cmd> {
     var_definitions
 }
 
+
+fn collect_variables_from_assignments_in_loop_body(com:Cmd) ->Vec<(Name,Type)> {
+    let mut variables = Vec::new();
+    match &com.kind {
+        CmdKind::Assignment { name, expr } => {
+            variables.push((name.clone(), expr.ty.clone()));
+        }
+        CmdKind::Seq(command1, command2) => {
+            let mut variables1 = collect_variables_from_assignments_in_loop_body(*command1.clone());
+            let mut variables2 = collect_variables_from_assignments_in_loop_body(*command2.clone());
+            variables.append(&mut variables1);
+            variables.append(&mut variables2);
+        }
+        _ => todo!("Not supported (yet)."),
+    }
+    variables
+}  
+
+// Creates sequence of IVL commands from a vector of IVL commands
+fn sequence_from_vec(vec: Vec<IVLCmd>) -> IVLCmd {
+    vec.iter().fold(IVLCmd::nop(), |acc, cmd| IVLCmd::seq(&acc, cmd))
+}
+
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
 // a single assertion)
 fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
@@ -219,28 +242,28 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             &cmd_to_ivlcmd(command2, &method)?,
         )),
         CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
-        CmdKind::Loop {
-            invariants,
-            variant,
-            body,
-        } => {
-            //first we need to do
-            // assert I ;
-            //  havoc x;
-            //  assume I
-            let invariant_expr = invariants_expression(invariants);
-            //I do not know how to make this flow in the cmds below
-            let assert_invariant = IVLCmd::assert(&invariant_expr, "invariant");
-            //assume invariant
-            let assume_invariant = IVLCmd::assume(&invariant_expr);
+        // CmdKind::Loop {
+        //     invariants,
+        //     variant,
+        //     body,
+        // } => {
+        //     //first we need to do
+        //     // assert I ;
+        //     //  havoc x;
+        //     //  assume I
+        //     let invariant_expr = invariants_expression(invariants);
+        //     //I do not know how to make this flow in the cmds below
+        //     let assert_invariant = IVLCmd::assert(&invariant_expr, "invariant");
+        //     //assume invariant
+        //     let assume_invariant = IVLCmd::assume(&invariant_expr);
 
-            let modified_variables = collect_var_definitions(&body);
-            //The above variables should be connected in some way
+        //     let modified_variables = collect_var_definitions(&body);
+        //     //The above variables should be connected in some way
 
-            // the cases of the loop should be handled as match
+        //     // the cases of the loop should be handled as match
 
-            Ok(IVLCmd::nop())
-        }
+        //     Ok(IVLCmd::nop())
+        // }
         CmdKind::Return { expr } => {
             let re_ensure = ensures_expressions2(&method);
             //first of all check  if the method is returning something
@@ -339,10 +362,64 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             });
             Ok(command)
         }
+        CmdKind::Loop { invariants, variant, body } => {
+            let sequence_of_invariant_assertions = invariants.iter().map(|inv| {
+                Cmd::new(CmdKind::Assert { condition: inv.clone(), message: "Invariant might fail!".to_string() })
+            }).reduce(|acc, cmd| {
+                Cmd::seq(&acc, &cmd)
+            }).unwrap_or_else(|| Cmd::nop());
+            
+            // initializing vector
+            let mut vec_of_modified_variables = Vec::new();
+            // Append modified variables from body to the vector vec_of_modified_variables
+            for case in body.cases.iter() {
+                let vars =collect_variables_from_assignments_in_loop_body(case.cmd.clone());
+                // Add all elements from vars to vec_of_modified_variables
+                vec_of_modified_variables.extend(vars);
+            }
+
+
+            // Create havoc commands for each variable in vec_of_modified_variables
+            let sequence_of_havoc_commands = vec_of_modified_variables.iter().fold(Box::new(Cmd::nop()), |acc, (var_name, var_type)| {
+                Box::new(Cmd::seq(&acc, &Box::new(Cmd::vardef(var_name, var_type, &None))))
+            });
+            // Create a sequence of assumptions for each invariant
+            let sequence_of_invariant_assumptions = invariants.iter().fold(Box::new(Cmd::nop()), |acc, inv| {
+                Box::new(Cmd::seq(&acc, &Box::new(Cmd::assume(inv))))
+            });
+
+            // Create a match statement for each case in cases
+            let sequence_of_cases = body.cases.iter().fold(Vec::new(), |mut acc:Vec<Case>, case| {
+                let condition = case.condition.clone();
+                let command = case.cmd.clone();
+                let first_seq = Cmd::seq(&command, &sequence_of_invariant_assertions.clone());
+                let assume_false = Cmd::assume(&Expr::bool(false));
+                let sequence = Cmd::seq( &first_seq,&assume_false);
+                acc.push(Case{condition, cmd: sequence});
+                acc
+            });
+            
+            // Create a match statement for each case in cases
+            let match_statement = CmdKind::Match { body: Cases{cases: sequence_of_cases, span: invariants[0].span} };
+            
+            Ok(cmd_to_ivlcmd(&Cmd::new(match_statement), method)?)
+
+        }
 
         _ => todo!("Not supported (yet)."),
     }
 }
+
+// assert I; 
+// havoc z̅; 
+// assume I; // (1) re-declarations gone, assumption changed
+// if (b) {
+//   enc(C); // encoding of C 
+//   assert I; // fails if I is not an invariant
+//   assume false // (2) discard remaining execution steps 
+// } else {
+//   skip
+// }
 
 // Code to substitute variables in an expressions, to make the IVL commands into DSA
 // fn sub_new_var(expr:Expr) -> Result<Expr>{
