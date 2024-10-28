@@ -1,9 +1,7 @@
 pub mod ivl;
 mod ivl_ext;
+use crate::slang::ast::Case;
 use itertools::fold;
-use std::sync::{Arc, Mutex};
-use std::thread;
-
 use ivl::{IVLCmd, IVLCmdKind};
 use slang::ast::{Cases, Cmd, CmdKind, Expr, ExprKind, Ident, Method, Name, Quantifier, Type, Var};
 use slang::Span;
@@ -60,32 +58,34 @@ impl slang_ui::Hook for App {
 
             print!("dsa: ");
             print!("{}", dsa.to_string());
+            let mut initial_vector = vec![(Expr::bool(true), "".to_string())];
             // Calculate obligation and error message (if obligation is not
             // verified)
-            let (oblig, msg) = wp(&dsa, &Expr::bool(true))?;
-            // Convert obligation to SMT expression
-            let soblig = oblig.smt()?;
+            for (oblig, msg) in swp(&dsa, initial_vector) {
+                // println!("{:?}", initial_vector.clone());             
+                let soblig = oblig.smt()?;
 
-            // Run the following solver-related statements in a closed scope.
-            // That is, after exiting the scope, all assertions are forgotten
-            // from subsequent executions of the solver
-            solver.scope(|solver| {
-                // Check validity of obligation
-                solver.assert(!soblig.as_bool()?)?;
-                // Run SMT solver on all current assertions
-                match solver.check_sat()? {
-                    // If the obligations result not valid, report the error (on
-                    // the span in which the error happens)
-                    smtlib::SatResult::Sat => {
-                        cx.error(oblig.span, format!("{msg}"));
+                // Run the following solver-related statements in a closed scope.
+                // That is, after exiting the scope, all assertions are forgotten
+                // from subsequent executions of the solver
+                solver.scope(|solver| {
+                    // Check validity of obligation
+                    solver.assert(!soblig.as_bool()?)?;
+                    // Run SMT solver on all current assertions
+                    match solver.check_sat()? {
+                        // If the obligations result not valid, report the error (on
+                        // the span in which the error happens)
+                        smtlib::SatResult::Sat => {
+                            cx.error(oblig.span, format!("{msg}"));
+                        }
+                        smtlib::SatResult::Unknown => {
+                            cx.warning(oblig.span, "{msg}: unknown sat result");
+                        }
+                        smtlib::SatResult::Unsat => (),
                     }
-                    smtlib::SatResult::Unknown => {
-                        cx.warning(oblig.span, "{msg}: unknown sat result");
-                    }
-                    smtlib::SatResult::Unsat => (),
-                }
-                Ok(())
-            })?;
+                    Ok(())
+                })?;
+            }
         }
 
         Ok(())
@@ -266,6 +266,29 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             })
         }
 
+        CmdKind::Match { body } => {
+            // Here, we create a start for the match, which we can use as an initial point for the fold function
+            // The initial case is "Assume false;assert True"
+            let start = IVLCmd::seq(
+                &IVLCmd::assume(&Expr::bool(false)),
+                &IVLCmd::assert(&Expr::bool(true), "message"),
+            );
+            // Here we call the fold function, which takes the start and the cases from the match.
+            // The fold function will iterate over the cases and create a command for each case, which is then combined with the previous command.
+            // The fold collects new cases with a NonDet command.
+            // With the initial command the fold output looks like this:
+            // Assume false ; assert true [] assume b1; c1 [] assume b2; c2 [] assume b3; c3
+            let command = body.cases.iter().fold(start, |acc: IVLCmd, case: &Case| {
+                let con = case.condition.clone();
+                let case_command = case.cmd.clone();
+                let assume = IVLCmd::assume(&con);
+                let cmd = cmd_to_ivlcmd(&case_command, &method).unwrap();
+                IVLCmd::nondet(&acc, &IVLCmd::seq(&assume, &cmd))
+                // Use reduce (Fold som ikke tager initial element)
+            });
+            Ok(command)
+        }
+
         _ => todo!("Not supported (yet)."),
     }
 }
@@ -279,13 +302,17 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
 // }
 
 // Initializing an empty hashmap
-fn init_map() -> HashMap<Ident, i32> {
+fn init_map() -> HashMap<Ident, (i32, Type)> {
     HashMap::new()
 }
 
-fn synchronize_cmd(com1: IVLCmd, map1: HashMap<Ident, i32>, map2: HashMap<Ident, i32>) -> IVLCmd {
-    for (key, value1) in map1 {
-        if let Some(&value2) = map2.get(&key) {
+fn synchronize_cmd(
+    com1: IVLCmd,
+    map1: HashMap<Ident, (i32, Type)>,
+    map2: HashMap<Ident, (i32, Type)>,
+) -> IVLCmd {
+    for (key, (value1, _)) in map1 {
+        if let Some(&(value2, _)) = map2.get(&key) {
             if value2 > value1 {
                 let new_ident = Ident(format!("{}{}", key, value2));
                 let old_ident = Ident(format!("{}{}", key, value1));
@@ -307,36 +334,46 @@ fn synchronize_cmd(com1: IVLCmd, map1: HashMap<Ident, i32>, map2: HashMap<Ident,
 
 // Maybe not sure
 fn update_variable_map(
-    variable_map: &mut HashMap<Ident, i32>,
-    map1: &HashMap<Ident, i32>,
-    map2: &HashMap<Ident, i32>,
+    variable_map: &mut HashMap<Ident, (i32, Type)>,
+    map1: &HashMap<Ident, (i32, Type)>,
+    map2: &HashMap<Ident, (i32, Type)>,
 ) {
     // Iterate over map1 and update variable_map
-    for (key, &value1) in map1.iter() {
-        let entry = variable_map.entry(key.clone()).or_insert(value1);
-        if value1 > *entry {
-            *entry = value1;
+    for (key, &(value1, ref type1)) in map1.iter() {
+        let entry = variable_map
+            .entry(key.clone())
+            .or_insert((value1, type1.clone()));
+        if value1 > entry.0 {
+            entry.0 = value1;
+            entry.1 = type1.clone();
         }
     }
 
     // Iterate over map2 and update variable_map
-    for (key, &value2) in map2.iter() {
-        let entry = variable_map.entry(key.clone()).or_insert(value2);
-        if value2 > *entry {
-            *entry = value2;
+    for (key, &(value2, ref type2)) in map2.iter() {
+        let entry = variable_map
+            .entry(key.clone())
+            .or_insert((value2, type2.clone()));
+        if value2 > entry.0 {
+            entry.0 = value2;
+            entry.1 = type2.clone();
         }
     }
 }
 
 // Updates a variable to the newest version according to the map
-fn update_variable_name(variable: &Ident, map: &mut HashMap<Ident, i32>) -> Ident {
+fn update_variable_name(
+    variable: &Ident,
+    map: &mut HashMap<Ident, (i32, Type)>,
+    var_type: Type,
+) -> Ident {
     // Check if the variable exists in the map
-    let counter = map.entry(variable.clone()).or_insert(0);
-    // If it does increase its value by 1, otherwise add it to the map.
-    *counter += 1;
+    let entry = map.entry(variable.clone()).or_insert((0, var_type.clone()));
+    // If it does, increase its value by 1
+    entry.0 += 1;
 
     // Return the new variable name with the counter
-    let new_variable_name = format!("{}{}", variable, counter);
+    let new_variable_name = format!("{}{}", variable.0, entry.0);
 
     // Create an Ident instance
     Ident(new_variable_name)
@@ -345,24 +382,38 @@ fn update_variable_name(variable: &Ident, map: &mut HashMap<Ident, i32>) -> Iden
 // Code to make IVL commands to DSA form (Dynamic Single Assignment)
 // This code works by creating a map variable_map, which keeps track of all the variables and maps them to the number of times they occur in the program.
 // Using the variable_map, we can change the name of each of the variables, to the variablename concatenated with the number.
-fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IVLCmd> {
+fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32, Type)>) -> Result<IVLCmd> {
     match &ivl.kind {
         // For each of the variables in the variable_map we check whether the variable occurs in the expression (rhs of the assignment)
         // If the variable occur, we change it with the value found in the map (ie. "x" becomes "x5" etc.) and we look for the next variable in the variable_map.
         // Then we look for the variable which gets assigned (the lhs of the assignment) and updates it in the variable_map (see definition of update_variable_name)
         // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
         IVLCmdKind::Assignment { name, expr } => {
-            let expr = (variable_map.iter().fold(expr.clone(), |acc, (var, &val)| {
-                let new_ident = Ident(format!("{}{}", var, val));
-                let new_expr = Expr::ident(&new_ident, &Type::Int);
-                // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
-                acc.subst_ident(var, &new_expr)
-            }));
-            let new_name = &Name::ident(update_variable_name(&name.ident, variable_map));
-            let assign = IVLCmd::assign(new_name, &expr);
-            let havoc_assign = IVLCmd::seq(&IVLCmd::havoc(new_name, &Type::Int), &assign);
-            // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
-            Ok(havoc_assign)
+            println!("Assignment before substitution, span: {}-{}", expr.span.start(), expr.span.end());
+
+            let original_span = expr.span.clone();
+
+            let mut expr = (variable_map
+                .iter()
+                .fold(expr.clone(), |acc, (var, &(val, ref ty))| {
+                    let new_ident = Ident(format!("{}{}", var, val));
+                    let new_expr = Expr::ident(&new_ident, &ty.clone());
+                    acc.subst_ident(var, &new_expr)
+                }));
+            
+            expr.span = original_span;
+            println!("Assignment after substitution, span: {}-{}", expr.span.start(), expr.span.end());
+
+
+            let new_name = &Name::ident(update_variable_name(
+                &name.ident,
+                variable_map,
+                expr.ty.clone(),
+            ));
+            let command = IVLCmd::assume(
+                &Expr::ident(&new_name.ident, &expr.ty).op(slang::ast::Op::Eq, &expr),
+            );
+            Ok(command)
         }
         // For assert we do the same as for assign except we only have an expression, not a new variable.
         // Iterate through the variable_map
@@ -370,14 +421,22 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
         // Continue with the rest of the map
         // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
         IVLCmdKind::Assert { condition, message } => {
-            let new_condition = variable_map
-                .iter()
-                .fold(condition.clone(), |acc, (var, &val)| {
-                    let new_ident = Ident(format!("{}{}", var, val));
-                    let new_expr = Expr::ident(&new_ident, &Type::Int);
-                    // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
-                    acc.subst_ident(var, &new_expr)
-                });
+            println!("Assert before substitution, span: {}-{}", condition.span.start(), condition.span.end());
+
+            let original_span = condition.span.clone();
+
+            let mut new_condition =
+                variable_map
+                    .iter()
+                    .fold(condition.clone(), |acc, (var, &(val, ref ty))| {
+                        let new_ident = Ident(format!("{}{}", var, val));
+                        let new_expr = Expr::ident(&new_ident, &ty.clone());
+                        acc.subst_ident(var, &new_expr)
+                    });
+            
+            new_condition.span = original_span;
+            println!("Assert after substitution, span: {}-{}", new_condition.span.start(), new_condition.span.end());
+
             Ok(IVLCmd::assert(&new_condition, &message.clone()))
         }
         // For assume we do the same as for assign except we only have an expression, not a new variable.
@@ -388,10 +447,9 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
         IVLCmdKind::Assume { condition } => Ok(IVLCmd::assume(
             &(variable_map
                 .iter()
-                .fold(condition.clone(), |acc, (var, &val)| {
+                .fold(condition.clone(), |acc, (var, &(val, ref ty))| {
                     let new_ident = Ident(format!("{}{}", var, val));
-                    let new_expr = Expr::ident(&new_ident, &Type::Int);
-                    // THIS IS HARDCODED NEEDS TO BE CHANGED SPEAK TO TA ABOUT IT ^^^
+                    let new_expr = Expr::ident(&new_ident, &ty.clone());
                     acc.subst_ident(var, &new_expr)
                 })),
         )),
@@ -418,10 +476,8 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, i32>) -> Result<IV
             // println!("name sent to IVLCmd::havoc: {:?}", name);
             // println!("type sent to IVLCmd::havoc: {:?}", &ty.clone());
             // println!("newname sent to IVLCmd::havoc: {:?}", &Name::ident(update_variable_name(&name.ident, variable_map)));
-            Ok(IVLCmd::havoc(
-                &Name::ident(update_variable_name(&name.ident, variable_map)),
-                &ty.clone(),
-            ))
+            update_variable_name(&name.ident, variable_map, ty.clone());
+            Ok(IVLCmd::assume(&Expr::bool(true)))
         }
         _ => todo!("Not supported (yet)."),
     }
@@ -455,18 +511,69 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
         )),
         //wp of havoc
         //the logic is true but we should make sure that span.Default() is true
-        IVLCmdKind::Havoc { name, ty } => Ok((
-            Expr::quantifier(
-                Quantifier::Forall,
-                &[Var {
-                    span: Span::default(),
-                    name: name.clone(),
-                    ty: (Span::default(), ty.clone()),
-                }],
-                postcon,
-            ),
-            "HERE".to_string(),
-        )),
+        IVLCmdKind::Havoc { name, ty } => unreachable!("Havoc should not be in the IVL command"),
+        _ => todo!("Not supported (yet)."),
+    }
+}
+
+// Weakest precondition of (assert-only) IVL programs comprised of a single assertion
+fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)> {
+    match &ivl.kind {
+        IVLCmdKind::Assert { condition, message } => {
+    
+         
+
+            // Push the condition and message into pc_msg_list
+            pc_msg_list.push((condition.clone(), message.clone()));
+
+            // Print the updated pc_msg_list to verify it has been added correctly
+            println!("Updated pc_msg_list:");
+            for (i, (pc, msg)) in pc_msg_list.iter().enumerate() {
+                println!("  Entry {}: Condition: {}, Message: {}", i + 1, pc.to_string(), msg);
+            }
+
+            pc_msg_list
+        }
+        // Assume has not been documented in the report yet
+        // Here the wp of assume with the condition, C, takes the postcondition, G, and returns the weakest precondition:
+        // I.e. : wp[assume C](G) = C -> G
+        IVLCmdKind::Assume { condition } => {
+            for (pc, msg) in pc_msg_list.iter_mut() {
+        
+                // Apply the implication
+                let updated_pc = condition.clone().imp(pc);
+                *pc = updated_pc.with_span(pc.span);  // Ensure the span of `pc` is preserved
+                
+            }
+            pc_msg_list
+        }
+        // Seq has not been documented in the report yet
+        // Here the wp of assume with the commands: command1 and command2 and the postcondition G returns the weakest precondition:
+        // I.e. : wp[command1;command2](G) = wp[command1]( wp[command2](G) )
+        IVLCmdKind::Seq(command1, command2) => {
+            // The order is important as we need it to be bottom up for swp in order to apply the assumptions correctly.
+            let pc_msg_list = swp(command2, pc_msg_list);
+            let pc_msg_list = swp(command1, pc_msg_list);
+            pc_msg_list
+        }
+        //After the code is transformed to dsa
+        //we compute wp by assuming the assigment, for example if we have x:=3 we assume x==3
+        // (name==expr) ==> postcond
+        IVLCmdKind::Assignment { name, expr } => unreachable!("Assignment should not be here"),
+        //wp of havoc
+        //the logic is true but we should make sure that span.Default() is true
+        IVLCmdKind::Havoc { name, ty } => unreachable!("Havoc should not be here"),
+        IVLCmdKind::NonDet(command1, command2) => {
+            // Clone the current pc_msg_list to apply swp to each command independently
+            let pc_msg_list1 = swp(command1, pc_msg_list.clone());
+            let pc_msg_list2 = swp(command2, pc_msg_list);
+
+            // Combine both lists into a single list to represent non-deterministic choice
+            let mut combined_pc_msg_list = pc_msg_list1;
+            combined_pc_msg_list.extend(pc_msg_list2);
+
+            combined_pc_msg_list
+        }
         _ => todo!("Not supported (yet)."),
     }
 }
