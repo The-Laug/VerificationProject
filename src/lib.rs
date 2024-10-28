@@ -363,9 +363,12 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             Ok(command)
         }
         CmdKind::Loop { invariants, variant, body } => {
-            let sequence_of_invariant_assertions = invariants.iter().fold(IVLCmd::nop(), |acc, inv| {
-                IVLCmd::seq(&acc, &IVLCmd::assert(inv, "Invariant might fail!"))
-            });
+            let sequence_of_invariant_assertions = invariants.iter().map(|inv| {
+                Cmd::new(CmdKind::Assert { condition: inv.clone(), message: "Invariant might fail!".to_string() })
+            }).reduce(|acc, cmd| {
+                Cmd::seq(&acc, &cmd)
+            }).unwrap_or_else(|| Cmd::nop());
+            
             // initializing vector
             let mut vec_of_modified_variables = Vec::new();
             // Append modified variables from body to the vector vec_of_modified_variables
@@ -377,39 +380,29 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
 
 
             // Create havoc commands for each variable in vec_of_modified_variables
-            let sequence_of_havoc_commands = vec_of_modified_variables.iter().fold(IVLCmd::nop(), |acc, (var_name,var_type)| {
-                IVLCmd::seq(&acc, &IVLCmd::havoc(&var_name, &var_type))
+            let sequence_of_havoc_commands = vec_of_modified_variables.iter().fold(Box::new(Cmd::nop()), |acc, (var_name, var_type)| {
+                Box::new(Cmd::seq(&acc, &Box::new(Cmd::vardef(var_name, var_type, &None))))
             });
             // Create a sequence of assumptions for each invariant
-            let sequence_of_invariant_assumptions = invariants.iter().fold(IVLCmd::nop(), |acc, inv| {
-                IVLCmd::seq(&acc, &IVLCmd::assume(inv))
+            let sequence_of_invariant_assumptions = invariants.iter().fold(Box::new(Cmd::nop()), |acc, inv| {
+                Box::new(Cmd::seq(&acc, &Box::new(Cmd::assume(inv))))
             });
 
             // Create a match statement for each case in cases
-            let sequence_of_cases = body.cases.iter().fold(IVLCmd::nop(), |acc, case| {
+            let sequence_of_cases = body.cases.iter().fold(Vec::new(), |mut acc:Vec<Case>, case| {
                 let condition = case.condition.clone();
                 let command = case.cmd.clone();
-                let assume = IVLCmd::assume(&condition);
-                let cmd = cmd_to_ivlcmd(&command, &method).unwrap();
-                let seq = IVLCmd::seq(&assume, &cmd);
-                let first_seq = IVLCmd::seq(&seq, &sequence_of_invariant_assertions);
-                let assume_false = IVLCmd::assume(&Expr::bool(false));
-                let sequence = IVLCmd::seq( &first_seq,&assume_false);
-                IVLCmd::nondet(&acc, &sequence)
+                let first_seq = Cmd::seq(&command, &sequence_of_invariant_assertions.clone());
+                let assume_false = Cmd::assume(&Expr::bool(false));
+                let sequence = Cmd::seq( &first_seq,&assume_false);
+                acc.push(Case{condition, cmd: sequence});
+                acc
             });
             
-            // Creating vector of all the commands
-            let mut all_commands = vec![
-                sequence_of_invariant_assertions,
-                sequence_of_havoc_commands,
-                sequence_of_invariant_assumptions,
-                sequence_of_cases,
-                ];
-                
-            // Combine all the commands into a single command with sequences
-            let final_command = sequence_from_vec(all_commands);
+            // Create a match statement for each case in cases
+            let match_statement = CmdKind::Match { body: Cases{cases: sequence_of_cases, span: invariants[0].span} };
             
-            Ok(final_command)
+            Ok(cmd_to_ivlcmd(&Cmd::new(match_statement), method)?)
 
         }
 
