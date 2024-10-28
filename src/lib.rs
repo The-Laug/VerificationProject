@@ -242,28 +242,28 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             &cmd_to_ivlcmd(command2, &method)?,
         )),
         CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
-        CmdKind::Loop {
-            invariants,
-            variant,
-            body,
-        } => {
-            //first we need to do
-            // assert I ;
-            //  havoc x;
-            //  assume I
-            let invariant_expr = invariants_expression(invariants);
-            //I do not know how to make this flow in the cmds below
-            let assert_invariant = IVLCmd::assert(&invariant_expr, "invariant");
-            //assume invariant
-            let assume_invariant = IVLCmd::assume(&invariant_expr);
+        // CmdKind::Loop {
+        //     invariants,
+        //     variant,
+        //     body,
+        // } => {
+        //     //first we need to do
+        //     // assert I ;
+        //     //  havoc x;
+        //     //  assume I
+        //     let invariant_expr = invariants_expression(invariants);
+        //     //I do not know how to make this flow in the cmds below
+        //     let assert_invariant = IVLCmd::assert(&invariant_expr, "invariant");
+        //     //assume invariant
+        //     let assume_invariant = IVLCmd::assume(&invariant_expr);
 
-            let modified_variables = collect_var_definitions(&body);
-            //The above variables should be connected in some way
+        //     let modified_variables = collect_var_definitions(&body);
+        //     //The above variables should be connected in some way
 
-            // the cases of the loop should be handled as match
+        //     // the cases of the loop should be handled as match
 
-            Ok(IVLCmd::nop())
-        }
+        //     Ok(IVLCmd::nop())
+        // }
         CmdKind::Return { expr } => {
             let re_ensure = ensures_expressions2(&method);
             //first of all check  if the method is returning something
@@ -397,7 +397,6 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                 let sequence = IVLCmd::seq( &first_seq,&assume_false);
                 IVLCmd::nondet(&acc, &sequence)
             });
-
             
             // Creating vector of all the commands
             let mut all_commands = vec![
