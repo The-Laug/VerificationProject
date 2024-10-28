@@ -473,12 +473,8 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
 fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)> {
     match &ivl.kind {
         IVLCmdKind::Assert { condition, message } => {
-            // Print the condition and message before pushing to pc_msg_list
-            println!("Assert encountered:");
-            println!("Condition: {}", condition.to_string());  // Print the condition as a string
-            println!("Message: {}", message);                 // Print the associated message
-            println!("Span start: {}", condition.span.start());
-            println!("Span end: {}", condition.span.end());
+    
+         
 
             // Push the condition and message into pc_msg_list
             pc_msg_list.push((condition.clone(), message.clone()));
@@ -496,23 +492,11 @@ fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)
         // I.e. : wp[assume C](G) = C -> G
         IVLCmdKind::Assume { condition } => {
             for (pc, msg) in pc_msg_list.iter_mut() {
-                // Print the initial state of pc, msg, and its span
-                println!("Assume Encountered, Before implication:");
-                println!("Condition (pc): {}", pc.to_string());
-                println!("Message: {}", msg);
-                println!("Span start: {}", pc.span.start());
-                println!("Span end: {}", pc.span.end());
         
                 // Apply the implication
                 let updated_pc = condition.clone().imp(pc);
                 *pc = updated_pc.with_span(pc.span);  // Ensure the span of `pc` is preserved
                 
-                // Print the modified state of pc after the implication
-                println!("After implication:");
-                println!("Condition (pc): {}", pc.to_string());
-                println!("Message: {}", msg);
-                println!("Span start: {}", pc.span.start());
-                println!("Span end: {}", pc.span.end());
             }
             pc_msg_list
         }
