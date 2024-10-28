@@ -623,13 +623,6 @@ fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)
             let pc_msg_list = swp(command1, pc_msg_list);
             pc_msg_list
         }
-        //After the code is transformed to dsa
-        //we compute wp by assuming the assigment, for example if we have x:=3 we assume x==3
-        // (name==expr) ==> postcond
-        IVLCmdKind::Assignment { name, expr } => unreachable!("Assignment should not be here"),
-        //wp of havoc
-        //the logic is true but we should make sure that span.Default() is true
-        IVLCmdKind::Havoc { name, ty } => unreachable!("Havoc should not be here"),
         IVLCmdKind::NonDet(command1, command2) => {
             // Clone the current pc_msg_list to apply swp to each command independently
             let pc_msg_list1 = swp(command1, pc_msg_list.clone());
