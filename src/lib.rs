@@ -391,7 +391,8 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                 list_of_condtions.push(condition.clone());
                 let command = case.cmd.clone();
                 let seq = Cmd::seq(&command, &sequence_of_invariant_assertions.clone());
-                acc.push(Case{condition, cmd: seq});
+                let seq2 = Cmd::seq(&seq, &Cmd::assume(&Expr::bool(false)));
+                acc.push(Case{condition, cmd: seq2});
                 acc
             });
 
@@ -422,26 +423,6 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
     }
 }
 
-// assert I; 
-// havoc z̅; 
-// assume I; // (1) re-declarations gone, assumption changed
-// if (b) {
-//   enc(C); // encoding of C 
-//   assert I; // fails if I is not an invariant
-//   assume false // (2) discard remaining execution steps 
-// } else {
-//   skip
-// }
-
-// Code to substitute variables in an expressions, to make the IVL commands into DSA
-// fn sub_new_var(expr:Expr) -> Result<Expr>{
-//     match &expr {
-//         Expr::ExprKind::Infix::add{e1,e2} => Ok(Expr::error()),
-//         _ => todo!("Not supported (yet)."),
-//     }
-// }
-
-// Initializing an empty hashmap
 fn init_map() -> HashMap<Ident, (i32, Type)> {
     HashMap::new()
 }
@@ -611,7 +592,7 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32, Type)>) -> R
             // println!("type sent to IVLCmd::havoc: {:?}", &ty.clone());
             // println!("newname sent to IVLCmd::havoc: {:?}", &Name::ident(update_variable_name(&name.ident, variable_map)));
             update_variable_name(&name.ident, variable_map, ty.clone());
-            Ok(IVLCmd::assume(&Expr::bool(true)))
+            Ok(IVLCmd::nop())
         }
         _ => todo!("Not supported (yet)."),
     }
