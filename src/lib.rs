@@ -5,16 +5,17 @@ use itertools::fold;
 use ivl::{IVLCmd, IVLCmdKind};
 use regex::NoExpand;
 use slang::ast::{
-    Cases, Cmd, CmdKind, Expr, ExprKind, Ident, Method, Name, Op, Quantifier, Range, Type, Var
+    Cases, Cmd, CmdKind, Expr, ExprKind, Ident, Method, Name, Op, Quantifier, Range, Type, Var,
 };
 use slang::Span;
 use slang_ui::prelude::*;
+use std::borrow::Borrow;
 // use std::collections::btree_map::Range;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
-use std::ops::Not;
 use std::iter;
+use std::ops::Not;
 
 pub struct App;
 
@@ -174,6 +175,9 @@ fn invariants_expression(invariants: &Vec<Expr>) -> Expr {
     in_exp
 }
 
+
+
+
 //Core B
 //These are 2 related functions that iterate over the cases and find the modified variables
 //the final result will be vec of Cmd::VarDef of thos modifies variables
@@ -229,6 +233,29 @@ fn collect_variables_from_assignments_in_loop_body(com: Cmd) -> Vec<(Name, Type)
 fn sequence_from_vec(vec: Vec<IVLCmd>) -> IVLCmd {
     vec.iter()
         .fold(IVLCmd::nop(), |acc, cmd| IVLCmd::seq(&acc, cmd))
+}
+
+
+fn eval_expr(expr: &Expr) -> i64 {
+    match &expr.kind {
+        ExprKind::Num(n) => *n,
+        ExprKind::Infix(expr1, Op::Add, expr2) => eval_expr(expr1) + eval_expr(expr2),
+        ExprKind::Infix(expr1, Op::Sub, expr2) => eval_expr(expr1) - eval_expr(expr2),
+        ExprKind::Infix(expr1, Op::Mul, expr2) => eval_expr(expr1) * eval_expr(expr2),
+        ExprKind::Infix(expr1, Op::Div, expr2) => eval_expr(expr1) / eval_expr(expr2),
+        ExprKind::Infix(expr1, Op::Mod,expr2 ) => eval_expr(expr1) % eval_expr(expr2),
+        _ => todo!("Cant evaluate this expression"),
+    }
+}
+
+// Related to extension 1: bounded for-loops (*)
+// Function that takes an expression and returns a bool if there is any ident in the expression
+fn contains_ident(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Ident(_) => true,
+        ExprKind::Infix(expr1, _, expr2) => contains_ident(expr1) || contains_ident(expr2),
+        _ => false,
+    }
 }
 
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
@@ -382,7 +409,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             variant,
             body,
         } => {
-            let mut invariants = invariants.clone(); 
+            let mut invariants = invariants.clone();
             invariants.extend(iter::once(Expr::bool(true)));
             // Create a sequence of invariant assertions
             let sequence_of_invariant_assertions = invariants
@@ -430,7 +457,10 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                         let condition = case.condition.clone();
                         list_of_conditions.push(condition.clone());
                         if variant.is_some() {
-                            let var_name = Ident("variant".to_string());
+                            let var_name = Ident(
+                                "PREDEFINED_VARIABLE_DONT_USE".to_owned()
+                                    + &variant.clone().unwrap().span.clone().start().to_string(),
+                            );
                             let variant_type = variant.clone().unwrap().ty.clone();
                             let variant_initialization =
                                 Cmd::vardef(&Name::ident(var_name.clone()), &variant_type, variant);
@@ -496,10 +526,14 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                 },
             });
 
-
-
-            let inner_loop_with_invariants = Cmd::seq(&match_statement_in_loop,&sequence_of_invariant_assertions.clone());
-            let inner_loop_with_invariants_seq = Cmd::new(CmdKind::Seq(Box::new(inner_loop_with_invariants), Box::new(Cmd::assume(&Expr::bool(false)))));
+            let inner_loop_with_invariants = Cmd::seq(
+                &match_statement_in_loop,
+                &sequence_of_invariant_assertions.clone(),
+            );
+            let inner_loop_with_invariants_seq = Cmd::new(CmdKind::Seq(
+                Box::new(inner_loop_with_invariants),
+                Box::new(Cmd::assume(&Expr::bool(false))),
+            ));
 
             let enter_loop_case = Case {
                 condition: combined_conditions,
@@ -508,7 +542,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
 
             let outer_match = Cmd::new(CmdKind::Match {
                 body: Cases {
-                    cases: vec![enter_loop_case,exit_case],
+                    cases: vec![enter_loop_case, exit_case],
                     span: invariants[0].span,
                 },
             });
@@ -520,14 +554,20 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                 ),
                 &Cmd::seq(
                     &sequence_of_invariant_assumptions, // Assume I
-                    &outer_match        // Outer match statement with the inner match statement
+                    &outer_match, // Outer match statement with the inner match statement
                 ),
             );
             println!("Completed encoding: {:#?}", complete_encoding);
 
             Ok(cmd_to_ivlcmd(&complete_encoding, &method)?)
-        },
-        CmdKind::For { name , range,  invariants, variant, body } => {
+        }
+        CmdKind::For {
+            name,
+            range,
+            invariants,
+            variant,
+            body,
+        } => {
             let mut invariants = invariants.clone();
             let mut lower;
             let mut upper;
@@ -537,57 +577,122 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                     upper = end.clone();
                 }
             };
-            
 
-            let lower_invariant = Expr::op(&Expr::ident(&name.ident, &range.elem_ty()), Op::Ge, &lower);
-            let upper_invariant = Expr::op(&Expr::ident(&name.ident, &range.elem_ty()), Op::Le, &upper);
-            let added_invariants : Vec<Expr> = vec![lower_invariant, upper_invariant];
-            invariants.extend(added_invariants);
+            if !(contains_ident(&lower) || contains_ident(&upper)) {
+                let lowerval = eval_expr(&lower);
+                let upperval = eval_expr(&upper);
+                let difference = upperval - lowerval;
+                if difference <= 0 {
+                    Ok(IVLCmd::nop())
+                } else {
+                    // Repeat the body of the for loop where the loop variable is incremented by 1 between lower and upper
+                    let increment_variable = Cmd::new(CmdKind::Assignment {
+                        name: name.clone(),
+                        expr: Expr::op(
+                            &Expr::ident(&name.ident, &range.elem_ty()),
+                            Op::Add,
+                            &Expr::num(1),
+                        ),
+                    });
+                    let mut initial_point = Cmd::assign(name, &Expr::num(lowerval));
+                    for i in 0..difference {
+                        let command = *body.cmd.clone();
+                        let intermediate_seq = Cmd::seq(&command, &increment_variable);
+                        initial_point = Cmd::seq(&initial_point, &intermediate_seq);
+                    }
+                    Ok(cmd_to_ivlcmd(&initial_point, &method)?)
 
-            let introduce_iterator: Cmd = Cmd::vardef(name, &range.elem_ty(), &Some(lower.clone()));
-
-            let increment_command = Cmd::new(CmdKind::Assignment {
-                name: name.clone(),
-                expr: Expr::op(&Expr::ident(&name.ident, &range.elem_ty()), Op::Add, &Expr::num(1)),
-            });
-            
-            let new_body = Cmd::new(CmdKind::Seq(Box::new(*body.clone().cmd), Box::new(increment_command)));
-            
-            let loop_case = Case {
-                condition: Expr::op(&Expr::ident(&name.ident, &range.elem_ty()), Op::Lt, &upper),
-                cmd: new_body,
-            };
-            let inner_loop = Cmd::new(CmdKind::Loop { invariants: invariants.clone(), variant: variant.clone(), body: Cases { cases: vec![loop_case.clone()], span: loop_case.condition.span } });
-
-            
-            let seq_with_loop = Cmd::seq(&introduce_iterator, &inner_loop);
-
-            let outer_loop_case = Case {
-                condition: Expr::op(&lower, Op::Lt, &upper),
-                cmd: seq_with_loop,
-            };
-            let non_loop_case = Case {
-                condition: Expr::op(&lower, Op::Ge, &upper),
-                cmd: Cmd::nop(),
-            };
-
-            let outer_match = Cmd::new(CmdKind::Match { body: Cases { cases: vec![outer_loop_case, non_loop_case], span: loop_case.condition.span }});
+                    // create a list of values between lowerval and upperval
+                    // let values: Vec<(Expr)> = (lowerval..upperval)
+                    //     .map(|i| (Expr::num(i)))
+                    //     .collect();
 
 
-            
-            // Print invariants
-            println!("Invariants: {:#?}", invariants);
-            // Print range
-            println!("Range: {:#?}", range);
-            // Print name
-            println!("Name: {:#?}", name);
-            
-            // let case_dont_loop = Case {
-            //     condition: Expr::op(&Expr::ident(name, &range.ty), Op::Ge, &range.end),
-            //     cmd: Cmd::assume(&Expr::bool(false)),
-            // };
-            // let ensure_correct_range = Cmd::new(CmdKind::Match { body:  });
-            Ok(cmd_to_ivlcmd(&outer_match, &method)?)
+
+                    // values.iter()
+                    // .fold(IVLCmd::nop(), |acc, i| {
+                    //     let command = *body.clone().cmd;
+                    //     let new_body = command.subst_ident(&name.ident, i);
+                    //     IVLCmd::seq(&acc, &cmd_to_ivlcmd(&new_body, &method).unwrap())
+                    // });
+                    // Ok(IVLCmd::nop())
+
+                }   
+
+            } else {
+                let lower_invariant =
+                    Expr::op(&Expr::ident(&name.ident, &range.elem_ty()), Op::Ge, &lower);
+                let upper_invariant =
+                    Expr::op(&Expr::ident(&name.ident, &range.elem_ty()), Op::Le, &upper);
+                let added_invariants: Vec<Expr> = vec![lower_invariant, upper_invariant];
+                invariants.extend(added_invariants);
+
+                let introduce_iterator: Cmd =
+                    Cmd::vardef(name, &range.elem_ty(), &Some(lower.clone()));
+
+                let increment_command = Cmd::new(CmdKind::Assignment {
+                    name: name.clone(),
+                    expr: Expr::op(
+                        &Expr::ident(&name.ident, &range.elem_ty()),
+                        Op::Add,
+                        &Expr::num(1),
+                    ),
+                });
+
+                let new_body = Cmd::new(CmdKind::Seq(
+                    Box::new(*body.clone().cmd),
+                    Box::new(increment_command),
+                ));
+
+                let loop_case = Case {
+                    condition: Expr::op(
+                        &Expr::ident(&name.ident, &range.elem_ty()),
+                        Op::Lt,
+                        &upper,
+                    ),
+                    cmd: new_body,
+                };
+                let inner_loop = Cmd::new(CmdKind::Loop {
+                    invariants: invariants.clone(),
+                    variant: variant.clone(),
+                    body: Cases {
+                        cases: vec![loop_case.clone()],
+                        span: loop_case.condition.span,
+                    },
+                });
+
+                let seq_with_loop = Cmd::seq(&introduce_iterator, &inner_loop);
+
+                let outer_loop_case = Case {
+                    condition: Expr::op(&lower, Op::Lt, &upper),
+                    cmd: seq_with_loop,
+                };
+                let non_loop_case = Case {
+                    condition: Expr::op(&lower, Op::Ge, &upper),
+                    cmd: Cmd::nop(),
+                };
+
+                let outer_match = Cmd::new(CmdKind::Match {
+                    body: Cases {
+                        cases: vec![outer_loop_case, non_loop_case],
+                        span: loop_case.condition.span,
+                    },
+                });
+
+                // Print invariants
+                println!("Invariants: {:#?}", invariants);
+                // Print range
+                println!("Range: {:#?}", range);
+                // Print name
+                println!("Name: {:#?}", name);
+
+                // let case_dont_loop = Case {
+                //     condition: Expr::op(&Expr::ident(name, &range.ty), Op::Ge, &range.end),
+                //     cmd: Cmd::assume(&Expr::bool(false)),
+                // };
+                // let ensure_correct_range = Cmd::new(CmdKind::Match { body:  });
+                Ok(cmd_to_ivlcmd(&outer_match, &method)?)
+            }
         }
 
         _ => todo!("Not supported (yet)."),
@@ -597,6 +702,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
 fn init_map() -> HashMap<Ident, (i32, Type)> {
     HashMap::new()
 }
+
 
 fn synchronize_cmd(
     com1: IVLCmd,
