@@ -11,7 +11,7 @@ method m(x: Int) {
 } //Passing
 
 
-method m(x: Int): Int 
+method m1(x: Int): Int 
     requires x >= 0
     ensures result >= 0
     // false: (consider execution when x = 1)
@@ -25,7 +25,7 @@ method m(x: Int): Int
 } //failing
 
 // Core Feature B: partial correctness of loops (★★)
-method sumn(n: Int): Int
+method sumn1(n: Int): Int
     requires n >= 0
     ensures result == n * (n + 1) / 2
 {
@@ -77,7 +77,7 @@ method sumn(n: Int): Int
 } // failing
 
 //Extension Feature 8: total correctness of loops (★★)
-method sumn(n: Int): Int
+method sumn3(n: Int): Int
     requires n >= 0
     ensures result == n * (n + 1)/2
 {
