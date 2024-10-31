@@ -252,28 +252,28 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             &cmd_to_ivlcmd(command2, &method)?,
         )),
         CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
-        CmdKind::Loop {
-            invariants,
-            variant,
-            body,
-        } => {
-            //first we need to do
-            // assert I ;
-            //  havoc x;
-            //  assume I
-            let invariant_expr = invariants_expression(invariants);
-            //I do not know how to make this flow in the cmds below
-            let assert_invariant = IVLCmd::assert(&invariant_expr, "invariant");
-            //assume invariant
-            let assume_invariant = IVLCmd::assume(&invariant_expr);
+        // CmdKind::Loop {
+        //     invariants,
+        //     variant,
+        //     body,
+        // } => {
+        //     //first we need to do
+        //     // assert I ;
+        //     //  havoc x;
+        //     //  assume I
+        //     let invariant_expr = invariants_expression(invariants);
+        //     //I do not know how to make this flow in the cmds below
+        //     let assert_invariant = IVLCmd::assert(&invariant_expr, "invariant");
+        //     //assume invariant
+        //     let assume_invariant = IVLCmd::assume(&invariant_expr);
 
-            let modified_variables = collect_var_definitions(&body);
-            //The above variables should be connected in some way
+        //     let modified_variables = collect_var_definitions(&body);
+        //     //The above variables should be connected in some way
 
-            // the cases of the loop should be handled as match
+        //     // the cases of the loop should be handled as match
 
-            Ok(IVLCmd::nop())
-        }
+        //     Ok(IVLCmd::nop())
+        // }
         CmdKind::Return { expr } => {
             let re_ensure = ensures_expressions2(&method);
             //first of all check  if the method is returning something
@@ -479,6 +479,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                 cmd: Cmd::assume(&Expr::not(combined_conditions)),
             };
             sequence_of_cases.push(exit_case);
+            print!("sequence_of_cases: {:#?}", );
 
             // Create a match statement for each case in cases
             let match_statement = CmdKind::Match {
@@ -501,6 +502,9 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             println!("Completed encoding: {:#?}", complete_encoding);
 
             Ok(cmd_to_ivlcmd(&complete_encoding, &method)?)
+        },
+        CmdKind::For { name , range, invariants, variant, body } => {
+
         }
 
         _ => todo!("Not supported (yet)."),
@@ -742,7 +746,13 @@ fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)
             let pc_msg_list = swp(command1, pc_msg_list);
             pc_msg_list
         }
-
+        //After the code is transformed to dsa
+        //we compute wp by assuming the assigment, for example if we have x:=3 we assume x==3
+        // (name==expr) ==> postcond
+        IVLCmdKind::Assignment { name, expr } => unreachable!("Assignment should not be here"),
+        //wp of havoc
+        //the logic is true but we should make sure that span.Default() is true
+        IVLCmdKind::Havoc { name, ty } => unreachable!("Havoc should not be here"),
         IVLCmdKind::NonDet(command1, command2) => {
             // Clone the current pc_msg_list to apply swp to each command independently
             let pc_msg_list1 = swp(command1, pc_msg_list.clone());
