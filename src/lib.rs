@@ -3,6 +3,7 @@ mod ivl_ext;
 use crate::slang::ast::Case;
 use itertools::fold;
 use ivl::{IVLCmd, IVLCmdKind};
+use regex::NoExpand;
 use slang::ast::{
     Cases, Cmd, CmdKind, Expr, ExprKind, Ident, Method, Name, Op, Quantifier, Range, Type, Var
 };
@@ -13,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
 use std::ops::Not;
+use std::iter;
 
 pub struct App;
 
@@ -380,6 +382,9 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             variant,
             body,
         } => {
+            let mut invariants = invariants.clone(); 
+            invariants.extend(iter::once(Expr::bool(true)));
+            // Create a sequence of invariant assertions
             let sequence_of_invariant_assertions = invariants
                 .iter()
                 .map(|inv| {
@@ -415,14 +420,15 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                 invariants.iter().fold(Box::new(Cmd::nop()), |acc, inv| {
                     Box::new(Cmd::seq(&acc, &Box::new(Cmd::assume(inv))))
                 });
-            let mut list_of_condtions = Vec::new();
+            let mut list_of_conditions = Vec::new();
+
             // Create a match statement for each case in cases
             let mut sequence_of_cases =
                 body.cases
                     .iter()
                     .fold(Vec::new(), |mut acc: Vec<Case>, case| {
                         let condition = case.condition.clone();
-                        list_of_condtions.push(condition.clone());
+                        list_of_conditions.push(condition.clone());
                         if variant.is_some() {
                             let var_name = Ident("variant".to_string());
                             let variant_type = variant.clone().unwrap().ty.clone();
@@ -450,45 +456,62 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                             });
                             let assert_variant_lt_start_seq =
                                 Cmd::seq(&variant_seq_command, &assert_variant_lt_start);
-                            let seq = Cmd::seq(
-                                &assert_variant_lt_start_seq,
-                                &sequence_of_invariant_assertions.clone(),
-                            );
-                            let seq2 = Cmd::seq(&seq, &Cmd::assume(&Expr::bool(false)));
+                            // let seq = Cmd::seq(
+                            //     &assert_variant_lt_start_seq,
+                            //     &sequence_of_invariant_assertions.clone(),
+                            // );
+                            // let seq2 = Cmd::seq(&seq, &Cmd::assume(&Expr::bool(false)));
                             acc.push(Case {
                                 condition,
-                                cmd: seq2,
+                                cmd: assert_variant_lt_start_seq,
                             });
                             acc
                         } else {
                             let command = case.cmd.clone();
-                            let seq = Cmd::seq(&command, &sequence_of_invariant_assertions.clone());
-                            let seq2 = Cmd::seq(&seq, &Cmd::assume(&Expr::bool(false)));
+                            // let seq = Cmd::seq(&command, &sequence_of_invariant_assertions.clone());
+                            // let seq2 = Cmd::seq(&command, &Cmd::assume(&Expr::bool(false)));
                             acc.push(Case {
                                 condition,
-                                cmd: seq2,
+                                cmd: command,
                             });
                             acc
                         }
                     });
 
-            let combined_conditions = list_of_condtions
+            let combined_conditions = list_of_conditions
                 .iter()
-                .fold(Expr::bool(true), |acc, cond| acc.and(cond));
+                .fold(Expr::bool(false), |acc, cond| acc.or(cond));
             let exit_case = Case {
                 condition: Expr::not(combined_conditions.clone()),
-                cmd: Cmd::assume(&Expr::not(combined_conditions)),
+                cmd: Cmd::nop(),
             };
-            sequence_of_cases.push(exit_case);
-            print!("sequence_of_cases: {:#?}", sequence_of_cases );
+            // sequence_of_cases.push(exit_case);
+            // print!("sequence_of_cases: {:#?}", sequence_of_cases );
 
             // Create a match statement for each case in cases
-            let match_statement = CmdKind::Match {
+            let match_statement_in_loop = Cmd::new(CmdKind::Match {
                 body: Cases {
                     cases: sequence_of_cases,
                     span: invariants[0].span,
                 },
+            });
+
+
+
+            let inner_loop_with_invariants = Cmd::seq(&match_statement_in_loop,&sequence_of_invariant_assertions.clone());
+            let inner_loop_with_invariants_seq = Cmd::new(CmdKind::Seq(Box::new(inner_loop_with_invariants), Box::new(Cmd::assume(&Expr::bool(false)))));
+
+            let enter_loop_case = Case {
+                condition: combined_conditions,
+                cmd: inner_loop_with_invariants_seq,
             };
+
+            let outer_match = Cmd::new(CmdKind::Match {
+                body: Cases {
+                    cases: vec![enter_loop_case,exit_case],
+                    span: invariants[0].span,
+                },
+            });
 
             let complete_encoding = Cmd::seq(
                 &Cmd::seq(
@@ -497,10 +520,10 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                 ),
                 &Cmd::seq(
                     &sequence_of_invariant_assumptions, // Assume I
-                    &Cmd::new(match_statement),         // Match statement with loop body
+                    &outer_match        // Outer match statement with the inner match statement
                 ),
             );
-            // println!("Completed encoding: {:#?}", complete_encoding);
+            println!("Completed encoding: {:#?}", complete_encoding);
 
             Ok(cmd_to_ivlcmd(&complete_encoding, &method)?)
         },
