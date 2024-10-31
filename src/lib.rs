@@ -3,12 +3,15 @@ mod ivl_ext;
 use crate::slang::ast::Case;
 use itertools::fold;
 use ivl::{IVLCmd, IVLCmdKind};
-use slang::ast::{Cases, Cmd, CmdKind, Expr, ExprKind, Ident, Method, Name, Quantifier, Type, Var};
+use slang::ast::{
+    Cases, Cmd, CmdKind, Expr, ExprKind, Ident, Method, Name, Op, Quantifier, Type, Var,
+};
 use slang::Span;
 use slang_ui::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
+use std::ops::Not;
 
 pub struct App;
 
@@ -202,11 +205,41 @@ fn collect_var_definitions(cases: &Cases) -> Vec<Cmd> {
     var_definitions
 }
 
+fn collect_variables_from_assignments_in_loop_body(com: Cmd) -> Vec<(Name, Type)> {
+    let mut variables = Vec::new();
+    match &com.kind {
+        CmdKind::Assignment { name, expr } => {
+            variables.push((name.clone(), expr.ty.clone()));
+        }
+        CmdKind::Seq(command1, command2) => {
+            let mut variables1 = collect_variables_from_assignments_in_loop_body(*command1.clone());
+            let mut variables2 = collect_variables_from_assignments_in_loop_body(*command2.clone());
+            variables.append(&mut variables1);
+            variables.append(&mut variables2);
+        }
+        _ => todo!("Not supported (yet)."),
+    }
+    variables
+}
+
+// Creates sequence of IVL commands from a vector of IVL commands
+fn sequence_from_vec(vec: Vec<IVLCmd>) -> IVLCmd {
+    vec.iter()
+        .fold(IVLCmd::nop(), |acc, cmd| IVLCmd::seq(&acc, cmd))
+}
+
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
 // a single assertion)
 fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
     match &cmd.kind {
-        CmdKind::Assert { condition, .. } => Ok(IVLCmd::assert(condition, "Assert might fail!")),
+        CmdKind::Assert { condition, message } => {
+            let assert_message = if message.len() < 2 {
+                "Assert might fail!".to_string()
+            } else {
+                message.clone()
+            };
+            Ok(IVLCmd::assert(condition, &assert_message))
+        }
         // Assume has not been documented in the report yet
         // Assume just takes the High level command Assume and passes the condition onto the assume IVL command
         // For the statement "assume true" the condition is "true" | for the statement "assume x == 2" the condition is "x == 2"
@@ -318,41 +351,162 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
         }
 
         CmdKind::Match { body } => {
-            // Here, we create a start for the match, which we can use as an initial point for the fold function
-            // The initial case is "Assume false;assert True"
-            let start = IVLCmd::seq(
-                &IVLCmd::assume(&Expr::bool(false)),
-                &IVLCmd::assert(&Expr::bool(true), "message"),
-            );
-            // Here we call the fold function, which takes the start and the cases from the match.
-            // The fold function will iterate over the cases and create a command for each case, which is then combined with the previous command.
-            // The fold collects new cases with a NonDet command.
-            // With the initial command the fold output looks like this:
-            // Assume false ; assert true [] assume b1; c1 [] assume b2; c2 [] assume b3; c3
-            let command = body.cases.iter().fold(start, |acc: IVLCmd, case: &Case| {
-                let con = case.condition.clone();
-                let case_command = case.cmd.clone();
-                let assume = IVLCmd::assume(&con);
-                let cmd = cmd_to_ivlcmd(&case_command, &method).unwrap();
-                IVLCmd::nondet(&acc, &IVLCmd::seq(&assume, &cmd))
-                // Use reduce (Fold som ikke tager initial element)
-            });
+            let cases: Vec<IVLCmd> = body
+                .cases
+                .iter()
+                .map(|case| {
+                    let condition = case.condition.clone();
+                    let case_command = case.cmd.clone();
+
+                    // Create an assume and command sequence for each case
+                    let assume = IVLCmd::assume(&condition);
+                    let cmd = cmd_to_ivlcmd(&case_command, &method).unwrap();
+
+                    IVLCmd::seq(&assume, &cmd) // Sequence assume and command for each case
+                })
+                .collect();
+
+            // Combine all cases as non-deterministic choices in a single step
+            let command = cases
+                .into_iter()
+                .reduce(|acc, case| IVLCmd::nondet(&acc, &case))
+                .unwrap_or_else(|| IVLCmd::nop());
+
             Ok(command)
+        }
+        CmdKind::Loop {
+            invariants,
+            variant,
+            body,
+        } => {
+            let sequence_of_invariant_assertions = invariants
+                .iter()
+                .map(|inv| {
+                    Cmd::new(CmdKind::Assert {
+                        condition: inv.clone(),
+                        message: "Invariant might fail!".to_string(),
+                    })
+                })
+                .reduce(|acc, cmd| Cmd::seq(&acc, &cmd))
+                .unwrap_or_else(|| Cmd::nop());
+
+            // initializing vector
+            let mut vec_of_modified_variables = Vec::new();
+            // Append modified variables from body to the vector vec_of_modified_variables
+            for case in body.cases.iter() {
+                let vars = collect_variables_from_assignments_in_loop_body(case.cmd.clone());
+                // Add all elements from vars to vec_of_modified_variables
+                vec_of_modified_variables.extend(vars);
+            }
+
+            // Create havoc commands for each variable in vec_of_modified_variables
+            let sequence_of_havoc_commands = vec_of_modified_variables.iter().fold(
+                Box::new(Cmd::nop()),
+                |acc, (var_name, var_type)| {
+                    Box::new(Cmd::seq(
+                        &acc,
+                        &Box::new(Cmd::vardef(var_name, var_type, &None)),
+                    ))
+                },
+            );
+            // Create a sequence of assumptions for each invariant
+            let sequence_of_invariant_assumptions =
+                invariants.iter().fold(Box::new(Cmd::nop()), |acc, inv| {
+                    Box::new(Cmd::seq(&acc, &Box::new(Cmd::assume(inv))))
+                });
+            let mut list_of_condtions = Vec::new();
+            // Create a match statement for each case in cases
+            let mut sequence_of_cases =
+                body.cases
+                    .iter()
+                    .fold(Vec::new(), |mut acc: Vec<Case>, case| {
+                        let condition = case.condition.clone();
+                        list_of_condtions.push(condition.clone());
+                        if variant.is_some() {
+                            let var_name = Ident("variant".to_string());
+                            let variant_type = variant.clone().unwrap().ty.clone();
+                            let variant_initialization =
+                                Cmd::vardef(&Name::ident(var_name.clone()), &variant_type, variant);
+                            let assert_var_leq_zero = Cmd::new(CmdKind::Assert {
+                                condition: Expr::op(
+                                    &variant.clone().unwrap(),
+                                    Op::Ge,
+                                    &Expr::num(0),
+                                ),
+                                message: "Variant might not decrease!".to_string(),
+                            });
+                            let variant_seq =
+                                Cmd::seq(&variant_initialization, &assert_var_leq_zero);
+                            let command = case.cmd.clone();
+                            let variant_seq_command = Cmd::seq(&variant_seq, &command);
+                            let assert_variant_lt_start = Cmd::new(CmdKind::Assert {
+                                condition: Expr::op(
+                                    &variant.clone().unwrap(),
+                                    Op::Lt,
+                                    &Expr::ident(&var_name.clone(), &variant_type),
+                                ),
+                                message: "Variant might not decrease!".to_string(),
+                            });
+                            let assert_variant_lt_start_seq =
+                                Cmd::seq(&variant_seq_command, &assert_variant_lt_start);
+                            let seq = Cmd::seq(
+                                &assert_variant_lt_start_seq,
+                                &sequence_of_invariant_assertions.clone(),
+                            );
+                            let seq2 = Cmd::seq(&seq, &Cmd::assume(&Expr::bool(false)));
+                            acc.push(Case {
+                                condition,
+                                cmd: seq2,
+                            });
+                            acc
+                        } else {
+                            let command = case.cmd.clone();
+                            let seq = Cmd::seq(&command, &sequence_of_invariant_assertions.clone());
+                            let seq2 = Cmd::seq(&seq, &Cmd::assume(&Expr::bool(false)));
+                            acc.push(Case {
+                                condition,
+                                cmd: seq2,
+                            });
+                            acc
+                        }
+                    });
+
+            let combined_conditions = list_of_condtions
+                .iter()
+                .fold(Expr::bool(true), |acc, cond| acc.and(cond));
+            let exit_case = Case {
+                condition: Expr::not(combined_conditions.clone()),
+                cmd: Cmd::assume(&Expr::not(combined_conditions)),
+            };
+            sequence_of_cases.push(exit_case);
+
+            // Create a match statement for each case in cases
+            let match_statement = CmdKind::Match {
+                body: Cases {
+                    cases: sequence_of_cases,
+                    span: invariants[0].span,
+                },
+            };
+
+            let complete_encoding = Cmd::seq(
+                &Cmd::seq(
+                    &sequence_of_invariant_assertions, // Assert I
+                    &sequence_of_havoc_commands,       // Havoc z̅
+                ),
+                &Cmd::seq(
+                    &sequence_of_invariant_assumptions, // Assume I
+                    &Cmd::new(match_statement),         // Match statement with loop body
+                ),
+            );
+            println!("Completed encoding: {:#?}", complete_encoding);
+
+            Ok(cmd_to_ivlcmd(&complete_encoding, &method)?)
         }
 
         _ => todo!("Not supported (yet)."),
     }
 }
 
-// Code to substitute variables in an expressions, to make the IVL commands into DSA
-// fn sub_new_var(expr:Expr) -> Result<Expr>{
-//     match &expr {
-//         Expr::ExprKind::Infix::add{e1,e2} => Ok(Expr::error()),
-//         _ => todo!("Not supported (yet)."),
-//     }
-// }
-
-// Initializing an empty hashmap
 fn init_map() -> HashMap<Ident, (i32, Type)> {
     HashMap::new()
 }
@@ -362,25 +516,23 @@ fn synchronize_cmd(
     map1: HashMap<Ident, (i32, Type)>,
     map2: HashMap<Ident, (i32, Type)>,
 ) -> IVLCmd {
-    for (key, (value1, _)) in map1 {
-        if let Some(&(value2, _)) = map2.get(&key) {
+    let mut synchronized_command = com1;
+    for (key, (value1, type1)) in map1 {
+        if let Some(&(value2, ref type2)) = map2.get(&key) {
             if value2 > value1 {
                 let new_ident = Ident(format!("{}{}", key, value2));
                 let old_ident = Ident(format!("{}{}", key, value1));
-                let assign = IVLCmd::assign(
-                    &Name::ident(new_ident),
-                    &Expr::ident(
-                        &old_ident,
-                        &Type::Unknown {
-                            name: Name::ident(old_ident.clone()),
-                        },
-                    ),
+                let equality_expr = Expr::op(
+                    &Expr::ident(&new_ident, type2),
+                    Op::Eq,
+                    &Expr::ident(&old_ident, &type1),
                 );
-                IVLCmd::seq(&com1, &assign);
+                let assume = IVLCmd::assume(&equality_expr);
+                synchronized_command = IVLCmd::seq(&synchronized_command, &assume);
             }
         }
     }
-    com1
+    synchronized_command
 }
 
 // Maybe not sure
@@ -440,12 +592,6 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32, Type)>) -> R
         // Then we look for the variable which gets assigned (the lhs of the assignment) and updates it in the variable_map (see definition of update_variable_name)
         // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
         IVLCmdKind::Assignment { name, expr } => {
-            println!(
-                "Assignment before substitution, span: {}-{}",
-                expr.span.start(),
-                expr.span.end()
-            );
-
             let original_span = expr.span.clone();
 
             let mut expr =
@@ -458,11 +604,6 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32, Type)>) -> R
                     }));
 
             expr.span = original_span;
-            println!(
-                "Assignment after substitution, span: {}-{}",
-                expr.span.start(),
-                expr.span.end()
-            );
 
             let new_name = &Name::ident(update_variable_name(
                 &name.ident,
@@ -480,12 +621,6 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32, Type)>) -> R
         // Continue with the rest of the map
         // NB. We use fold, because we want to use the output of the substitution to be the input of the next call of the fold function
         IVLCmdKind::Assert { condition, message } => {
-            println!(
-                "Assert before substitution, span: {}-{}",
-                condition.span.start(),
-                condition.span.end()
-            );
-
             let original_span = condition.span.clone();
 
             let mut new_condition =
@@ -498,11 +633,6 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32, Type)>) -> R
                     });
 
             new_condition.span = original_span;
-            println!(
-                "Assert after substitution, span: {}-{}",
-                new_condition.span.start(),
-                new_condition.span.end()
-            );
 
             Ok(IVLCmd::assert(&new_condition, &message.clone()))
         }
@@ -544,7 +674,7 @@ fn ivl_to_dsa(ivl: &IVLCmd, variable_map: &mut HashMap<Ident, (i32, Type)>) -> R
             // println!("type sent to IVLCmd::havoc: {:?}", &ty.clone());
             // println!("newname sent to IVLCmd::havoc: {:?}", &Name::ident(update_variable_name(&name.ident, variable_map)));
             update_variable_name(&name.ident, variable_map, ty.clone());
-            Ok(IVLCmd::assume(&Expr::bool(true)))
+            Ok(IVLCmd::nop())
         }
         _ => todo!("Not supported (yet)."),
     }
@@ -590,24 +720,13 @@ fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)
             // Push the condition and message into pc_msg_list
             pc_msg_list.push((condition.clone(), message.clone()));
 
-            // Print the updated pc_msg_list to verify it has been added correctly
-            println!("Updated pc_msg_list:");
-            for (i, (pc, msg)) in pc_msg_list.iter().enumerate() {
-                println!(
-                    "  Entry {}: Condition: {}, Message: {}",
-                    i + 1,
-                    pc.to_string(),
-                    msg
-                );
-            }
-
             pc_msg_list
         }
         // Assume has not been documented in the report yet
         // Here the wp of assume with the condition, C, takes the postcondition, G, and returns the weakest precondition:
         // I.e. : wp[assume C](G) = C -> G
         IVLCmdKind::Assume { condition } => {
-            for (pc, msg) in pc_msg_list.iter_mut() {
+            for (pc, _msg) in pc_msg_list.iter_mut() {
                 // Apply the implication
                 let updated_pc = condition.clone().imp(pc);
                 *pc = updated_pc.with_span(pc.span); // Ensure the span of `pc` is preserved
