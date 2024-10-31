@@ -4,10 +4,11 @@ use crate::slang::ast::Case;
 use itertools::fold;
 use ivl::{IVLCmd, IVLCmdKind};
 use slang::ast::{
-    Cases, Cmd, CmdKind, Expr, ExprKind, Ident, Method, Name, Op, Quantifier, Type, Var,
+    Cases, Cmd, CmdKind, Expr, ExprKind, Ident, Method, Name, Op, Quantifier, Range, Type, Var
 };
 use slang::Span;
 use slang_ui::prelude::*;
+// use std::collections::btree_map::Range;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
@@ -479,7 +480,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                 cmd: Cmd::assume(&Expr::not(combined_conditions)),
             };
             sequence_of_cases.push(exit_case);
-            print!("sequence_of_cases: {:#?}", );
+            print!("sequence_of_cases: {:#?}", sequence_of_cases );
 
             // Create a match statement for each case in cases
             let match_statement = CmdKind::Match {
@@ -499,12 +500,71 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                     &Cmd::new(match_statement),         // Match statement with loop body
                 ),
             );
-            println!("Completed encoding: {:#?}", complete_encoding);
+            // println!("Completed encoding: {:#?}", complete_encoding);
 
             Ok(cmd_to_ivlcmd(&complete_encoding, &method)?)
         },
-        CmdKind::For { name , range, invariants, variant, body } => {
+        CmdKind::For { name , range,  invariants, variant, body } => {
+            let mut invariants = invariants.clone();
+            let mut lower;
+            let mut upper;
+            match range {
+                slang::ast::Range::FromTo(start, end) => {
+                    lower = start.clone();
+                    upper = end.clone();
+                }
+            };
+            
 
+            let lower_invariant = Expr::op(&Expr::ident(&name.ident, &range.elem_ty()), Op::Ge, &lower);
+            let upper_invariant = Expr::op(&Expr::ident(&name.ident, &range.elem_ty()), Op::Le, &upper);
+            let added_invariants : Vec<Expr> = vec![lower_invariant, upper_invariant];
+            invariants.extend(added_invariants);
+
+            let introduce_iterator: Cmd = Cmd::vardef(name, &range.elem_ty(), &Some(lower.clone()));
+
+            let increment_command = Cmd::new(CmdKind::Assignment {
+                name: name.clone(),
+                expr: Expr::op(&Expr::ident(&name.ident, &range.elem_ty()), Op::Add, &Expr::num(1)),
+            });
+            
+            let new_body = Cmd::new(CmdKind::Seq(Box::new(*body.clone().cmd), Box::new(increment_command)));
+            
+            let loop_case = Case {
+                condition: Expr::op(&Expr::ident(&name.ident, &range.elem_ty()), Op::Lt, &upper),
+                cmd: new_body,
+            };
+            let inner_loop = Cmd::new(CmdKind::Loop { invariants: invariants.clone(), variant: variant.clone(), body: Cases { cases: vec![loop_case.clone()], span: loop_case.condition.span } });
+
+            
+            let seq_with_loop = Cmd::seq(&introduce_iterator, &inner_loop);
+
+            let outer_loop_case = Case {
+                condition: Expr::op(&lower, Op::Lt, &upper),
+                cmd: seq_with_loop,
+            };
+            let non_loop_case = Case {
+                condition: Expr::op(&lower, Op::Ge, &upper),
+                cmd: Cmd::nop(),
+            };
+
+            let outer_match = Cmd::new(CmdKind::Match { body: Cases { cases: vec![outer_loop_case, non_loop_case], span: loop_case.condition.span }});
+
+
+            
+            // Print invariants
+            println!("Invariants: {:#?}", invariants);
+            // Print range
+            println!("Range: {:#?}", range);
+            // Print name
+            println!("Name: {:#?}", name);
+            
+            // let case_dont_loop = Case {
+            //     condition: Expr::op(&Expr::ident(name, &range.ty), Op::Ge, &range.end),
+            //     cmd: Cmd::assume(&Expr::bool(false)),
+            // };
+            // let ensure_correct_range = Cmd::new(CmdKind::Match { body:  });
+            Ok(cmd_to_ivlcmd(&outer_match, &method)?)
         }
 
         _ => todo!("Not supported (yet)."),
