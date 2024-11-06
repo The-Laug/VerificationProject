@@ -11,10 +11,10 @@ method foo(M: Int, N: Int)
   while (N <= m) 
     invariant M == res * N + m
   {
-    var v: Int := V(m) // initialize variant
+    var v: Int := (m) // initialize variant
     assert v >= 0 // variant cannot decrease forever
     m := m - N
     res := res + 1
-    assert V(m) < v // variant has decreased after one iteration
+    assert (m) < v // variant has decreased after one iteration
   }
 }
