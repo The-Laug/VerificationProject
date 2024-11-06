@@ -716,11 +716,16 @@ fn wp(ivl: &IVLCmd, postcon: &Expr) -> Result<(Expr, String)> {
 // Weakest precondition of (assert-only) IVL programs comprised of a single assertion
 fn swp(ivl: &IVLCmd, mut pc_msg_list: Vec<(Expr, String)>) -> Vec<(Expr, String)> {
     match &ivl.kind {
-        IVLCmdKind::Assert { condition, message } => {
-            // Push the condition and message into pc_msg_list
-            pc_msg_list.push((condition.clone(), message.clone()));
 
-            pc_msg_list
+        IVLCmdKind::Assert { condition, message } => {
+            // handled masked errors by first assuming the assert for all existing pc_msg_list
+            // Create assume condition:
+            let assume_condition = IVLCmd::assume(&condition);
+            // Apply the assume condition to all existing pc_msg_list
+            let mut new_pc_msg_list = swp(&assume_condition, pc_msg_list.clone());
+            new_pc_msg_list.push((condition.clone(), message.clone()));
+
+            new_pc_msg_list
         }
         // Assume has not been documented in the report yet
         // Here the wp of assume with the condition, C, takes the postcondition, G, and returns the weakest precondition:
