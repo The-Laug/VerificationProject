@@ -24,10 +24,15 @@ impl slang_ui::Hook for App {
         // Get reference to Z3 solver
         let mut solver = cx.solver()?;
 
+        // List of global variables
+        let global_variables = file.globals();
+
         // Iterate methods
         for m in file.methods() {
             // Get method's preconditions;
             let pres = m.requires();
+            // Global variables potentially being modified in the method
+            let global = m.modifies();
             // Merge them into a single condition
             let pre = pres
                 .cloned()
@@ -76,15 +81,30 @@ impl slang_ui::Hook for App {
             // Convert IVL to DSA
             let dsa = ivl_to_dsa(&ivl, &mut init_map())?;
 
-            print!("dsa: ");
-            print!("{}", dsa.to_string());
+            println!("dsa: ");
+            println!("{}", dsa.to_string());
             let mut initial_vector = vec![(Expr::bool(true), "".to_string())];
             // Calculate obligation and error message (if obligation is not
             // verified)
             for (oblig, msg) in swp(&dsa, initial_vector) {
+                
+            
+                let oblig = match m.return_ty {
+                    Some((_,Type::Int)) => {
+                        println!("In the case of Int:__________________________ ");
+                        oblig.subst_result(&Expr::num(10))
+                    },
+                    Some((_,Type::Bool)) => {
+                        print!("In the case of BOOL: ");
+                        oblig.subst_result(&Expr::bool(true))
+                    },
+                    _ => continue,
+                };
+                
                 // println!("{:?}", initial_vector.clone());
                 let soblig = oblig.smt()?;
-
+                
+                
                 // Run the following solver-related statements in a closed scope.
                 // That is, after exiting the scope, all assertions are forgotten
                 // from subsequent executions of the solver
@@ -257,10 +277,28 @@ fn contains_ident(expr: &Expr) -> bool {
         _ => false,
     }
 }
+// Related to encoding of match statements
+fn has_return(cmd: &Cmd) -> bool {
+    match &cmd.kind {
+        CmdKind::Return { .. } => true,
+        CmdKind::Seq(ref left, ref right) => has_return(left) || has_return(right),
+        CmdKind::Match { ref body } => body.cases.iter().all(|case| has_return(&case.cmd)),
+        CmdKind::Loop { body, .. } => {
+            body.cases.iter().any(|case| has_return(&case.cmd)) // Check each case in loop body
+        },
+
+        CmdKind::For { body, .. } => {
+            has_return(&body.cmd) // Check each command in the for loop's body block
+        },
+        _ => false,
+    }
+}
+
 
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
 // a single assertion)
 fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
+    let method2 = method;
     match &cmd.kind {
         CmdKind::Assert { condition, message } => {
             let assert_message = if message.len() < 2 {
@@ -282,81 +320,54 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             &cmd_to_ivlcmd(command2, &method)?,
         )),
         CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
-        // CmdKind::Loop {
-        //     invariants,
-        //     variant,
-        //     body,
-        // } => {
-        //     //first we need to do
-        //     // assert I ;
-        //     //  havoc x;
-        //     //  assume I
-        //     let invariant_expr = invariants_expression(invariants);
-        //     //I do not know how to make this flow in the cmds below
-        //     let assert_invariant = IVLCmd::assert(&invariant_expr, "invariant");
-        //     //assume invariant
-        //     let assume_invariant = IVLCmd::assume(&invariant_expr);
-
-        //     let modified_variables = collect_var_definitions(&body);
-        //     //The above variables should be connected in some way
-
-        //     // the cases of the loop should be handled as match
-
-        //     Ok(IVLCmd::nop())
-        // }
         CmdKind::Return { expr } => {
             let re_ensure = ensures_expressions2(&method);
-            //first of all check  if the method is returning something
-            //if no ignore the return cmdKind
+        
+            // Check if the method is returning a value
             match expr {
                 Some(expr_value) => {
-                    //here i should find if there are ensures in the specifications
-                    //if yes then i should assert it else i should nop()
                     if re_ensure.1 {
-                        //The ivl that i want to return at the end
+                        // The IVL command that will eventually be returned
                         let mut ivlcmd;
-
-                        //if we have only one ensure we are returning the assert of it
-                        //and subs the result by expr_value
+        
+                        // If there's only one ensures condition, substitute and assert it
                         if re_ensure.0.len() == 1 {
-                            let x = &re_ensure.0[0].span;
+                            let span = &re_ensure.0[0].span;
                             ivlcmd = IVLCmd::assert(
-                                &re_ensure.0[0].subst_result(expr_value).with_span(x.clone()),
+                                &re_ensure.0[0].subst_result(expr_value).with_span(span.clone()),
                                 "Ensures might fail!",
                             );
                         } else {
-                            //if we have more than one ensure we are returning them as seq of the assert od each
-                            //and subs the result by expr_value
-                            //we are using the with_span because subst_result is making changes on the span
-                            let s = &re_ensure.0[0].span;
-                            //i am taking the first item in the vec as first ivl and then iterating on the rest
-                            //inorder to connect them using seq
+                            // Multiple ensures: sequence of asserts with substituted values
+                            let span = &re_ensure.0[0].span;
                             ivlcmd = IVLCmd::assert(
-                                &re_ensure.0[0].subst_result(expr_value).with_span(s.clone()),
+                                &re_ensure.0[0].subst_result(expr_value).with_span(span.clone()),
                                 "Ensures might fail!",
                             );
-
+        
+                            // Chain the asserts for each ensures condition
                             for expr in &re_ensure.0[1..] {
-                                // Slice starting from the second item
-                                let x = &expr.span;
+                                let span = &expr.span;
                                 let ivl = IVLCmd::assert(
-                                    &expr.subst_result(expr_value).with_span(x.clone()),
+                                    &expr.subst_result(expr_value).with_span(span.clone()),
                                     "Ensures might fail!",
                                 );
-                                ivlcmd = ivlcmd.seq(&ivl)
+                                ivlcmd = ivlcmd.seq(&ivl);
                             }
                         }
-
+        
+                        // Combine the ensures with `assume(false)` for early return
+                        ivlcmd = ivlcmd.seq(&IVLCmd::assume(&Expr::bool(false)));
                         Ok(ivlcmd)
                     } else {
-                        Ok(IVLCmd::nop())
+                        // No ensures; simply use `assume(false)` to prevent further execution
+                        Ok(IVLCmd::assume(&Expr::bool(false)))
                     }
                 }
-                None => Ok(IVLCmd::nop()),
+                None => Ok(IVLCmd::assume(&Expr::bool(false))), // No return value, but still prevent further execution
             }
-
-            // Ok(IVLCmd::nop())
         }
+        
 
         CmdKind::VarDefinition {
             name,
@@ -381,11 +392,17 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
         }
 
         CmdKind::Match { body } => {
+            // Check if all cases in the match has return calls
+            let all_cases_return = body.cases.iter().all(|case| has_return(&case.cmd));
+
+            let mut negation_condition = Expr::bool(true);
+
             let cases: Vec<IVLCmd> = body
                 .cases
                 .iter()
                 .map(|case| {
-                    let condition = case.condition.clone();
+                    let condition = Expr::and(&negation_condition, &case.condition.clone());
+                    negation_condition = Expr::and(&negation_condition, &Expr::not(case.condition.clone()));
                     let case_command = case.cmd.clone();
 
                     // Create an assume and command sequence for each case
@@ -397,10 +414,33 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                 .collect();
 
             // Combine all cases as non-deterministic choices in a single step
-            let command = cases
+            let mut command = cases
                 .into_iter()
                 .reduce(|acc, case| IVLCmd::nondet(&acc, &case))
                 .unwrap_or_else(|| IVLCmd::nop());
+
+            // If all cases have return statements, add an `assume(false)` for the default case
+            // If all cases have return statements, create a negated guard for the default case
+            if all_cases_return {
+                // Combine all guards with OR to get the condition `(b1 OR b2 OR ... OR bn)`
+                let combined_guard = body
+                    .cases
+                    .iter()
+                    .map(|case| case.condition.clone())
+                    .fold(Expr::bool(false), |acc, guard| acc.or(&guard));
+
+                // Negate the combined guard to get `!(b1 OR b2 OR ... OR bn)`
+                let negated_guard = Expr::not(combined_guard);
+
+                // Add the default case with `assume(false)` as its body
+                let unreachable_case = IVLCmd::seq(
+                    &IVLCmd::assume(&negated_guard),
+                    &IVLCmd::assume(&Expr::bool(false)),
+                );
+
+                // Combine the unreachable case with the existing command
+                command = IVLCmd::nondet(&command, &unreachable_case);
+            }
 
             Ok(command)
         }
@@ -693,7 +733,94 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                 // let ensure_correct_range = Cmd::new(CmdKind::Match { body:  });
                 Ok(cmd_to_ivlcmd(&outer_match, &method)?)
             }
-        }
+        },
+        CmdKind::MethodCall { name, fun_name, args, method } => {
+            let method_ref = method.get().unwrap();
+            let method_vars: Vec<Var> = method_ref.args.clone();
+            let requires: Vec<Expr> = method_ref.requires().cloned().collect();
+            let ensures: Vec<Expr> = method_ref.ensures().cloned().collect();
+            
+            // Create temporary variables for the arguments with names from their span Expr.span
+            
+            let mut arg_idents = Vec::new();
+            let temp_args_seq: Cmd = args
+                .iter()
+                .map(|arg| {
+                    let ident = Ident(format!("arg_{}_{}", arg.span.start(), arg.span.start()));
+                    arg_idents.push(ident.clone());
+                    Cmd::vardef(&Name::ident(ident), &arg.ty, &Some(arg.clone()))
+                })
+                .fold(Cmd::nop(), |acc, cmd| Cmd::seq(&acc, &cmd));
+
+            // Substitute the argument idents in the requires expressions from the one in method_vars with arg_idents, there are equally many in the two list
+            let mut new_requires = Vec::new();
+            new_requires.push(Expr::bool(true));
+            for (i, vars) in method_vars.iter().enumerate() {
+                for expr in requires.iter() {
+                    new_requires.push(expr.subst_ident(&vars.name.ident, &Expr::ident(&arg_idents[i], &vars.ty.1).with_span(expr.span.clone())));
+            }
+}
+
+            // Create a sequence of the requires expressions as asserts
+            let requires_asserts_seq = new_requires
+                .iter()
+                .map(|expr| Cmd::new(CmdKind::Assert {
+                    condition: expr.clone(),
+                    message: "Requires might fail!".to_string(),
+                }))
+                .fold(Cmd::nop(), |acc, cmd| Cmd::seq(&acc, &cmd));
+            
+            if name.is_some() {
+                let return_var_def = Cmd::vardef(&Name::ident(name.clone().unwrap().ident), &method_ref.return_ty.as_ref().unwrap().1, &None);
+                // I would also like to substitute the return value in ensure that is always an ident named 'return' with return_var
+                let mut new_ensures_with_return_changed = Vec::new();
+                for expr in ensures.iter() {
+                    new_ensures_with_return_changed.push(expr.subst_result(&Expr::ident(&name.as_ref().unwrap().ident, &method_ref.return_ty.as_ref().unwrap().1)).with_span(expr.span.clone()));                
+                }    
+                let mut new_ensures = Vec::new();
+                new_ensures.push(Expr::bool(true));
+                for (i, vars) in method_vars.iter().enumerate() {
+                    for expr in new_ensures_with_return_changed.iter() {
+                         new_ensures.push(expr.subst_ident(&vars.name.ident, &Expr::ident(&arg_idents[i], &vars.ty.1)).with_span(expr.span.clone()));
+                    }
+                }
+
+
+                // Create a sequence of the ensures expressions as assumes
+                let ensures_assumes_seq = new_ensures
+                    .iter()
+                    .map(|expr| Cmd::new(CmdKind::Assume {
+                     condition: expr.clone(),
+                    }))
+                    .fold(Cmd::nop(), |acc, cmd| Cmd::seq(&acc, &cmd));
+
+
+                // Create the sequence of first the var declarations, next the requires assert, then havoc and lastly ensure_asumes
+                let seq = Cmd::seq(&temp_args_seq, &requires_asserts_seq);
+                let seq2 = Cmd::seq(&seq, &return_var_def);
+                let seq3 = Cmd::seq(&seq2, &ensures_assumes_seq);
+                Ok(cmd_to_ivlcmd(&seq3, method2)?)
+                
+            } else {
+                let mut new_ensures = Vec::new();
+                new_ensures.push(Expr::bool(true));
+                for (i, vars) in method_vars.iter().enumerate() {
+                    for expr in ensures.iter() {
+                        new_ensures.push(expr.subst_ident(&vars.name.ident, &Expr::ident(&arg_idents[i], &vars.ty.1)));
+                    }
+                }
+                    // Create a sequence of the ensures expressions as assumes
+                let ensures_assumes_seq = new_ensures
+                    .iter()
+                    .map(|expr| Cmd::new(CmdKind::Assume {
+                        condition: expr.clone(),
+                    }))
+                    .fold(Cmd::nop(), |acc, cmd| Cmd::seq(&acc, &cmd));
+                let seq = Cmd::seq(&temp_args_seq, &requires_asserts_seq);
+                let seq2 = Cmd::seq(&seq, &ensures_assumes_seq);
+                Ok(cmd_to_ivlcmd(&seq2, method2)?)
+            }
+        },
 
         _ => todo!("Not supported (yet)."),
     }
