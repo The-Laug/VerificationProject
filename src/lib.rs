@@ -24,6 +24,7 @@ impl slang_ui::Hook for App {
         // Get reference to Z3 solver
         let mut solver = cx.solver()?;
 
+        
         // Iterate methods
         for m in file.methods() {
             // Get method's preconditions;
@@ -261,6 +262,7 @@ fn contains_ident(expr: &Expr) -> bool {
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
 // a single assertion)
 fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
+    let new_method = method;
     match &cmd.kind {
         CmdKind::Assert { condition, message } => {
             let assert_message = if message.len() < 2 {
@@ -693,6 +695,77 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                 // let ensure_correct_range = Cmd::new(CmdKind::Match { body:  });
                 Ok(cmd_to_ivlcmd(&outer_match, &method)?)
             }
+        }
+        CmdKind::MethodCall { name, fun_name, args, method } => {
+            let tmpmeth = method.get().unwrap().clone();
+            let margs = tmpmeth.args.clone();
+            let mpre = tmpmeth.requires();
+            let mpost = tmpmeth.ensures();
+            let return_type = &tmpmeth.return_ty;
+            // create temporary variables for each of the arguments
+            let mut temp_args = Vec::new();
+            for arg in args {
+                let temp_arg = Name::ident(Ident(format!("temp_DONT_USE_IN_PROGRAM{}", arg.span.start())));
+                temp_args.push(Cmd::vardef(&temp_arg, &arg.ty,&Some(arg.clone())));
+            }
+            // Create a sequence of all the temporary variable definitions and convert them to ivl using cmd_to_ivlcmd
+            let seq_temp_args = temp_args.iter().fold(IVLCmd::nop(), |acc, cmd| IVLCmd::seq(&acc, &cmd_to_ivlcmd(cmd, new_method).unwrap()));
+
+            // Zip args and margs, to create a vec of tuples
+            let zipped = args.iter().zip(margs.iter());
+            // For each requirement in mpre substitute arg with marg
+            let mut mreq: Vec<_> = Vec::new();
+            for req in mpre {
+                let mut new_req = req.clone();
+                for (arg, marg) in zipped.clone() {
+                    new_req = new_req.subst_ident(&marg.name.ident, arg);
+                }
+                mreq.push(new_req);
+            }
+            //Assert all expressions in mreq as sequences using fold
+            let mreq_seq = mreq.iter().fold(IVLCmd::nop(), |acc, req| IVLCmd::seq(&acc, &IVLCmd::assert(req, "Precondition might fail!")));
+
+            let mut return_statement = IVLCmd::nop();
+            //Havoc the name 
+            if name.is_none() {
+                let havoc_name = IVLCmd::nop();
+            }
+            else {
+                if return_type.is_some() {
+                    if let Some(name) = name {
+                        let havoc_name = IVLCmd::havoc(name, &return_type.as_ref().unwrap().1);
+                        // take all the post conditions and substitute the return value with the name
+                        let mut mpost2: Vec<Expr> = Vec::new();
+                        for post in mpost {
+                                let new_post = post.clone().subst_result(&Expr::ident(&name.clone().ident, &return_type.as_ref().unwrap().1));
+                                mpost2.push(new_post);
+                        }
+                        let mut mreq2: Vec<_> = Vec::new();
+                        for req in mpost2 {
+                            let mut new_post = req.clone();
+                            for (arg, marg) in zipped.clone() {
+                                new_post = new_post.subst_ident(&marg.name.ident, arg);
+                            }
+                            mreq2.push(new_post);
+                        }
+            
+                        // Assume all expressions in mreq2 as sequences using fold
+                        let mreq_seq2 = mreq2.iter().fold(IVLCmd::nop(), |acc, req| IVLCmd::seq(&acc, &IVLCmd::assert(req, "Postcondition might fail!")));
+            
+                        // Create a sequence of all the commands
+                        let seq = IVLCmd::seq(&seq_temp_args, &mreq_seq);
+                        let seq2 = IVLCmd::seq(&seq, &havoc_name);
+                        let seq3 = IVLCmd::seq(&seq2, &mreq_seq2);
+                        return_statement = seq3;
+                    }
+                }
+            }
+
+
+
+
+            Ok(return_statement)
+
         }
 
         _ => todo!("Not supported (yet)."),
