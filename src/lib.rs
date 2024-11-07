@@ -78,12 +78,24 @@ impl slang_ui::Hook for App {
             let dsa = ivl_to_dsa(&ivl, &mut init_map())?;
 
             print!("dsa: ");
-            print!("{}", dsa.to_string());
+            println!("{}", dsa.to_string());
             let mut initial_vector = vec![(Expr::bool(true), "".to_string())];
             // Calculate obligation and error message (if obligation is not
             // verified)
             for (oblig, msg) in swp(&dsa, initial_vector) {
                 // println!("{:?}", initial_vector.clone());
+                // println!("oblig: {:#?}", oblig);
+                let oblig = match m.return_ty {
+                    Some((_,Type::Int)) => {
+                        println!("In the case of Int:__________________________ ");
+                        oblig.subst_result(&Expr::num(10))
+                    },
+                    Some((_,Type::Bool)) => {
+                        print!("In the case of BOOL: ");
+                        oblig.subst_result(&Expr::bool(true))
+                    },
+                    _ => continue,
+                };
                 let soblig = oblig.smt()?;
 
                 // Run the following solver-related statements in a closed scope.
@@ -729,6 +741,9 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             //Havoc the name 
             if name.is_none() {
                 let havoc_name = IVLCmd::nop();
+                let seq = IVLCmd::seq(&seq_temp_args, &mreq_seq);
+                let seq2 = IVLCmd::seq(&seq, &havoc_name);
+                return_statement = seq2;
             }
             else {
                 if return_type.is_some() {
@@ -740,18 +755,20 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                                 let new_post = post.clone().subst_result(&Expr::ident(&name.clone().ident, &return_type.as_ref().unwrap().1));
                                 mpost2.push(new_post);
                         }
-                        let mut mreq2: Vec<_> = Vec::new();
+
+                        //Substitute all the arguments with the values from the called method
+                        let mut mpost3: Vec<_> = Vec::new();
                         for req in mpost2 {
                             let mut new_post = req.clone();
                             for (arg, marg) in zipped.clone() {
                                 new_post = new_post.subst_ident(&marg.name.ident, arg);
                             }
-                            mreq2.push(new_post);
+                            mpost3.push(new_post);
                         }
             
-                        // Assume all expressions in mreq2 as sequences using fold
-                        let mreq_seq2 = mreq2.iter().fold(IVLCmd::nop(), |acc, req| IVLCmd::seq(&acc, &IVLCmd::assert(req, "Postcondition might fail!")));
-            
+                        // Assume all expressions in mpost3 as sequences using fold
+                        let mreq_seq2 = mpost3.iter().fold(IVLCmd::nop(), |acc, req| IVLCmd::seq(&acc, &IVLCmd::assume(req)));
+                        println!("mreq_seq2: {:#?}", mreq_seq2);
                         // Create a sequence of all the commands
                         let seq = IVLCmd::seq(&seq_temp_args, &mreq_seq);
                         let seq2 = IVLCmd::seq(&seq, &havoc_name);
@@ -760,10 +777,6 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                     }
                 }
             }
-
-
-
-
             Ok(return_statement)
 
         }
