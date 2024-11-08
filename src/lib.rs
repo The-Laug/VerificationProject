@@ -76,12 +76,14 @@ impl slang_ui::Hook for App {
             // Convert IVL to DSA
             let dsa = ivl_to_dsa(&ivl, &mut init_map())?;
 
-            print!("dsa: ");
-            print!("{}", dsa.to_string());
+            println!("dsa: ");
+            println!("{}", dsa.to_string());
             let mut initial_vector = vec![(Expr::bool(true), "".to_string())];
             // Calculate obligation and error message (if obligation is not
             // verified)
             for (oblig, msg) in swp(&dsa, initial_vector) {
+
+    
                 // println!("{:?}", initial_vector.clone());
                 let soblig = oblig.smt()?;
 
@@ -123,13 +125,28 @@ fn contains_return(method: &Method) -> bool {
 //Core A check a method contains return
 fn check_cmd_for_return(cmd: &Cmd) -> bool {
     match &cmd.kind {
+        // If the command is a return, we found a return
         CmdKind::Return { expr: _ } => true,
+
+        // For sequential commands, check both subcommands
         CmdKind::Seq(command1, command2) => {
             check_cmd_for_return(command1) || check_cmd_for_return(command2)
         }
+
+        // For match statements, check if all branches contain a return
+        CmdKind::Match { body } => body.cases.iter().all(|case| check_cmd_for_return(&case.cmd)),
+
+        // For loop statements, check if the loop body contains a return
+        CmdKind::Loop { body, .. } => body.cases.iter().any(|case| check_cmd_for_return(&case.cmd)),
+
+        // For "for" loops, check if the body contains a return
+        CmdKind::For { body, .. } => check_cmd_for_return(&body.cmd),
+
+        // If a command kind is not expected to contain a return, we default to false
         _ => false,
     }
 }
+
 
 //related to core A
 //in this method i am returning all ensures expressions as 1 expr and between each there is and
@@ -258,9 +275,26 @@ fn contains_ident(expr: &Expr) -> bool {
     }
 }
 
+// Related to encoding of match statements
+fn has_return(cmd: &Cmd) -> bool {
+    match &cmd.kind {
+        CmdKind::Return { .. } => true,
+        CmdKind::Seq(ref left, ref right) => has_return(left) || has_return(right),
+        CmdKind::Match { ref body } => body.cases.iter().all(|case| has_return(&case.cmd)),
+        CmdKind::Loop { body, .. } => {
+            body.cases.iter().any(|case| has_return(&case.cmd)) // Check each case in loop body
+        },
+
+        CmdKind::For { body, .. } => {
+            has_return(&body.cmd) // Check each command in the for loop's body block
+        },
+        _ => false,
+    }
+}
+
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
 // a single assertion)
-fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
+fn cmd_to_ivlcmd(cmd: &Cmd, method_initial: &Method) -> Result<IVLCmd> {
     match &cmd.kind {
         CmdKind::Assert { condition, message } => {
             let assert_message = if message.len() < 2 {
@@ -278,8 +312,8 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
         // Seq takes 2 commands in the higher level language (CmdKind) and passes them unto the IVLCmd seq
         // Note: the commands have to be processed as well, so that the IVL command seq does not pass on higer level commands
         CmdKind::Seq(command1, command2) => Ok(IVLCmd::seq(
-            &cmd_to_ivlcmd(command1, &method)?,
-            &cmd_to_ivlcmd(command2, &method)?,
+            &cmd_to_ivlcmd(command1, &method_initial)?,
+            &cmd_to_ivlcmd(command2, &method_initial)?,
         )),
         CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
         // CmdKind::Loop {
@@ -305,7 +339,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
         //     Ok(IVLCmd::nop())
         // }
         CmdKind::Return { expr } => {
-            let re_ensure = ensures_expressions2(&method);
+            let re_ensure = ensures_expressions2(&method_initial);
             //first of all check  if the method is returning something
             //if no ignore the return cmdKind
             match expr {
@@ -381,29 +415,36 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
         }
 
         CmdKind::Match { body } => {
-            let cases: Vec<IVLCmd> = body
-                .cases
-                .iter()
-                .map(|case| {
-                    let condition = case.condition.clone();
-                    let case_command = case.cmd.clone();
+            // Check if all cases contain a return
+            let all_cases_return = body.cases.iter().all(|case| has_return(&case.cmd));
+        
+            // Initialize the "base case" as either `assume(false)` or `nop`
+            let mut nested_command = if all_cases_return {
+                IVLCmd::seq(&IVLCmd::assume(&Expr::bool(false)), &cmd_to_ivlcmd(&Cmd::new(CmdKind::Return { expr: Some(Expr::num(0)) }), method_initial)?)
+                 // Terminate if all cases have return
+            } else {
+                IVLCmd::nop() // No termination if some cases do not return
+            };
+        
+            // Build nested nondet structure from the last case to the first
+            for case in body.cases.iter().rev() {
+                let case_guard = case.condition.clone();
+                let case_command = cmd_to_ivlcmd(&case.cmd, &method_initial).unwrap();
+        
+                // Wrap each case as a nondet with the guard
+                let assume_guard = IVLCmd::assume(&case_guard);
+                let guarded_case = IVLCmd::seq(&assume_guard, &case_command);
 
-                    // Create an assume and command sequence for each case
-                    let assume = IVLCmd::assume(&condition);
-                    let cmd = cmd_to_ivlcmd(&case_command, &method).unwrap();
-
-                    IVLCmd::seq(&assume, &cmd) // Sequence assume and command for each case
-                })
-                .collect();
-
-            // Combine all cases as non-deterministic choices in a single step
-            let command = cases
-                .into_iter()
-                .reduce(|acc, case| IVLCmd::nondet(&acc, &case))
-                .unwrap_or_else(|| IVLCmd::nop());
-
-            Ok(command)
-        }
+                // Weap each nested command with the negation of the guard
+                let not_assume_guard = IVLCmd::assume(&Expr::not(case_guard));
+                let not_guarded_case = IVLCmd::seq(&not_assume_guard, &nested_command);
+        
+                // Nest the guarded case with the previous nested command as the fallback
+                nested_command = IVLCmd::nondet(&guarded_case, &not_guarded_case);
+            }
+        
+            Ok(nested_command)
+        },
         CmdKind::Loop {
             invariants,
             variant,
@@ -559,7 +600,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
             );
             println!("Completed encoding: {:#?}", complete_encoding);
 
-            Ok(cmd_to_ivlcmd(&complete_encoding, &method)?)
+            Ok(cmd_to_ivlcmd(&complete_encoding, &method_initial)?)
         }
         CmdKind::For {
             name,
@@ -600,7 +641,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                         let intermediate_seq = Cmd::seq(&command, &increment_variable);
                         initial_point = Cmd::seq(&initial_point, &intermediate_seq);
                     }
-                    Ok(cmd_to_ivlcmd(&initial_point, &method)?)
+                    Ok(cmd_to_ivlcmd(&initial_point, &method_initial)?)
 
                     // create a list of values between lowerval and upperval
                     // let values: Vec<(Expr)> = (lowerval..upperval)
@@ -613,7 +654,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                     // .fold(IVLCmd::nop(), |acc, i| {
                     //     let command = *body.clone().cmd;
                     //     let new_body = command.subst_ident(&name.ident, i);
-                    //     IVLCmd::seq(&acc, &cmd_to_ivlcmd(&new_body, &method).unwrap())
+                    //     IVLCmd::seq(&acc, &cmd_to_ivlcmd(&new_body, &method_initial).unwrap())
                     // });
                     // Ok(IVLCmd::nop())
 
@@ -691,7 +732,94 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
                 //     cmd: Cmd::assume(&Expr::bool(false)),
                 // };
                 // let ensure_correct_range = Cmd::new(CmdKind::Match { body:  });
-                Ok(cmd_to_ivlcmd(&outer_match, &method)?)
+                Ok(cmd_to_ivlcmd(&outer_match, &method_initial)?)
+            }
+        },
+        CmdKind::MethodCall { name, fun_name, args, method } => {
+            let method_ref = method.get().unwrap();
+            let method_vars: Vec<Var> = method_ref.args.clone();
+            let requires: Vec<Expr> = method_ref.requires().cloned().collect();
+            let ensures: Vec<Expr> = method_ref.ensures().cloned().collect();
+            
+            // Create temporary variables for the arguments with names from their span Expr.span
+            
+            let mut arg_idents = Vec::new();
+            let temp_args_seq: Cmd = args
+                .iter()
+                .map(|arg| {
+                    let ident = Ident(format!("arg_{}_{}", arg.span.start(), arg.span.start()));
+                    arg_idents.push(ident.clone());
+                    Cmd::vardef(&Name::ident(ident), &arg.ty, &Some(arg.clone()))
+                })
+                .fold(Cmd::nop(), |acc, cmd| Cmd::seq(&acc, &cmd));
+
+            // Substitute the argument idents in the requires expressions from the one in method_vars with arg_idents, there are equally many in the two list
+            let mut new_requires = Vec::new();
+            new_requires.push(Expr::bool(true));
+            for (i, vars) in method_vars.iter().enumerate() {
+                for expr in requires.iter() {
+                    new_requires.push(expr.subst_ident(&vars.name.ident, &Expr::ident(&arg_idents[i], &vars.ty.1).with_span(expr.span.clone())));
+            }
+}
+
+            // Create a sequence of the requires expressions as asserts
+            let requires_asserts_seq = new_requires
+                .iter()
+                .map(|expr| Cmd::new(CmdKind::Assert {
+                    condition: expr.clone(),
+                    message: "Requires might fail!".to_string(),
+                }))
+                .fold(Cmd::nop(), |acc, cmd| Cmd::seq(&acc, &cmd));
+            
+            if name.is_some() {
+                let return_var_def = Cmd::vardef(&Name::ident(name.clone().unwrap().ident), &method_ref.return_ty.as_ref().unwrap().1, &None);
+                // I would also like to substitute the return value in ensure that is always an ident named 'return' with return_var
+                let mut new_ensures_with_return_changed = Vec::new();
+                for expr in ensures.iter() {
+                    new_ensures_with_return_changed.push(expr.subst_result(&Expr::ident(&name.as_ref().unwrap().ident, &method_ref.return_ty.as_ref().unwrap().1)).with_span(expr.span.clone()));                
+                }    
+                let mut new_ensures = Vec::new();
+                new_ensures.push(Expr::bool(true));
+                for (i, vars) in method_vars.iter().enumerate() {
+                    for expr in new_ensures_with_return_changed.iter() {
+                         new_ensures.push(expr.subst_ident(&vars.name.ident, &Expr::ident(&arg_idents[i], &vars.ty.1)).with_span(expr.span.clone()));
+                    }
+                }
+
+
+                // Create a sequence of the ensures expressions as assumes
+                let ensures_assumes_seq = new_ensures
+                    .iter()
+                    .map(|expr| Cmd::new(CmdKind::Assume {
+                     condition: expr.clone(),
+                    }))
+                    .fold(Cmd::nop(), |acc, cmd| Cmd::seq(&acc, &cmd));
+
+
+                // Create the sequence of first the var declarations, next the requires assert, then havoc and lastly ensure_asumes
+                let seq = Cmd::seq(&temp_args_seq, &requires_asserts_seq);
+                let seq2 = Cmd::seq(&seq, &return_var_def);
+                let seq3 = Cmd::seq(&seq2, &ensures_assumes_seq);
+                Ok(cmd_to_ivlcmd(&seq3, method_initial)?)
+                
+            } else {
+                let mut new_ensures = Vec::new();
+                new_ensures.push(Expr::bool(true));
+                for (i, vars) in method_vars.iter().enumerate() {
+                    for expr in ensures.iter() {
+                        new_ensures.push(expr.subst_ident(&vars.name.ident, &Expr::ident(&arg_idents[i], &vars.ty.1)));
+                    }
+                }
+                    // Create a sequence of the ensures expressions as assumes
+                let ensures_assumes_seq = new_ensures
+                    .iter()
+                    .map(|expr| Cmd::new(CmdKind::Assume {
+                        condition: expr.clone(),
+                    }))
+                    .fold(Cmd::nop(), |acc, cmd| Cmd::seq(&acc, &cmd));
+                let seq = Cmd::seq(&temp_args_seq, &requires_asserts_seq);
+                let seq2 = Cmd::seq(&seq, &ensures_assumes_seq);
+                Ok(cmd_to_ivlcmd(&seq2, method_initial)?)
             }
         }
 
