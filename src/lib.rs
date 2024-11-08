@@ -291,7 +291,6 @@ fn has_return(cmd: &Cmd) -> bool {
     }
 }
 
-
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
 // a single assertion)
 fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
@@ -319,50 +318,56 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
         CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
         CmdKind::Return { expr } => {
             let re_ensure = ensures_expressions2(&method);
-        
-            // Check if the method is returning a value
+            //first of all check  if the method is returning something
+            //if no ignore the return cmdKind
             match expr {
                 Some(expr_value) => {
+                    //here i should find if there are ensures in the specifications
+                    //if yes then i should assert it else i should nop()
                     if re_ensure.1 {
-                        // The IVL command that will eventually be returned
+                        //The ivl that i want to return at the end
                         let mut ivlcmd;
-        
-                        // If there's only one ensures condition, substitute and assert it
+
+                        //if we have only one ensure we are returning the assert of it
+                        //and subs the result by expr_value
                         if re_ensure.0.len() == 1 {
-                            let span = &re_ensure.0[0].span;
+                            let x = &re_ensure.0[0].span;
                             ivlcmd = IVLCmd::assert(
-                                &re_ensure.0[0].subst_result(expr_value).with_span(span.clone()),
+                                &re_ensure.0[0].subst_result(expr_value).with_span(x.clone()),
                                 "Ensures might fail!",
                             );
                         } else {
-                            // Multiple ensures: sequence of asserts with substituted values
-                            let span = &re_ensure.0[0].span;
+                            //if we have more than one ensure we are returning them as seq of the assert od each
+                            //and subs the result by expr_value
+                            //we are using the with_span because subst_result is making changes on the span
+                            let s = &re_ensure.0[0].span;
+                            //i am taking the first item in the vec as first ivl and then iterating on the rest
+                            //inorder to connect them using seq
                             ivlcmd = IVLCmd::assert(
-                                &re_ensure.0[0].subst_result(expr_value).with_span(span.clone()),
+                                &re_ensure.0[0].subst_result(expr_value).with_span(s.clone()),
                                 "Ensures might fail!",
                             );
-        
-                            // Chain the asserts for each ensures condition
+
                             for expr in &re_ensure.0[1..] {
-                                let span = &expr.span;
+                                // Slice starting from the second item
+                                let x = &expr.span;
                                 let ivl = IVLCmd::assert(
-                                    &expr.subst_result(expr_value).with_span(span.clone()),
+                                    &expr.subst_result(expr_value).with_span(x.clone()),
                                     "Ensures might fail!",
                                 );
-                                ivlcmd = ivlcmd.seq(&ivl);
+                                ivlcmd = ivlcmd.seq(&ivl)
                             }
                         }
-        
-                        // Combine the ensures with `assume(false)` for early return
-                        ivlcmd = ivlcmd.seq(&IVLCmd::assume(&Expr::bool(false)));
+
                         Ok(ivlcmd)
                     } else {
-                        // No ensures; simply use `assume(false)` to prevent further execution
-                        Ok(IVLCmd::assume(&Expr::bool(false)))
+                        Ok(IVLCmd::nop())
                     }
                 }
-                None => Ok(IVLCmd::assume(&Expr::bool(false))), // No return value, but still prevent further execution
+                None => Ok(IVLCmd::nop()),
             }
+
+            // Ok(IVLCmd::nop())
         }
         
 
@@ -389,58 +394,37 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method: &Method) -> Result<IVLCmd> {
         }
 
         CmdKind::Match { body } => {
-            // Check if all cases in the match has return calls
+            // Check if all cases contain a return
             let all_cases_return = body.cases.iter().all(|case| has_return(&case.cmd));
+        
+            // Initialize the "base case" as either `assume(false)` or `nop`
+            let mut nested_command = if all_cases_return {
+                IVLCmd::assume(&Expr::bool(false)) // Terminate if all cases have return
+            } else {
+                IVLCmd::nop() // No termination if some cases do not return
+            };
+        
+            // Build nested nondet structure from the last case to the first
+            for case in body.cases.iter().rev() {
+                let case_guard = case.condition.clone();
+                let case_command = cmd_to_ivlcmd(&case.cmd, &method).unwrap();
+        
+                // Wrap each case as a nondet with the guard
+                let assume_guard = IVLCmd::assume(&case_guard);
+                let guarded_case = IVLCmd::seq(&assume_guard, &case_command);
 
-            let mut negation_condition = Expr::bool(true);
-
-            let cases: Vec<IVLCmd> = body
-                .cases
-                .iter()
-                .map(|case| {
-                    let condition = Expr::and(&negation_condition, &case.condition.clone());
-                    negation_condition = Expr::and(&negation_condition, &Expr::not(case.condition.clone()));
-                    let case_command = case.cmd.clone();
-
-                    // Create an assume and command sequence for each case
-                    let assume = IVLCmd::assume(&condition);
-                    let cmd = cmd_to_ivlcmd(&case_command, &method).unwrap();
-
-                    IVLCmd::seq(&assume, &cmd) // Sequence assume and command for each case
-                })
-                .collect();
-
-            // Combine all cases as non-deterministic choices in a single step
-            let mut command = cases
-                .into_iter()
-                .reduce(|acc, case| IVLCmd::nondet(&acc, &case))
-                .unwrap_or_else(|| IVLCmd::nop());
-
-            // If all cases have return statements, add an `assume(false)` for the default case
-            // If all cases have return statements, create a negated guard for the default case
-            if all_cases_return {
-                // Combine all guards with OR to get the condition `(b1 OR b2 OR ... OR bn)`
-                let combined_guard = body
-                    .cases
-                    .iter()
-                    .map(|case| case.condition.clone())
-                    .fold(Expr::bool(false), |acc, guard| acc.or(&guard));
-
-                // Negate the combined guard to get `!(b1 OR b2 OR ... OR bn)`
-                let negated_guard = Expr::not(combined_guard);
-
-                // Add the default case with `assume(false)` as its body
-                let unreachable_case = IVLCmd::seq(
-                    &IVLCmd::assume(&negated_guard),
-                    &IVLCmd::assume(&Expr::bool(false)),
-                );
-
-                // Combine the unreachable case with the existing command
-                command = IVLCmd::nondet(&command, &unreachable_case);
+                // Weap each nested command with the negation of the guard
+                let not_assume_guard = IVLCmd::assume(&Expr::not(case_guard));
+                let not_guarded_case = IVLCmd::seq(&not_assume_guard, &nested_command);
+        
+                // Nest the guarded case with the previous nested command as the fallback
+                nested_command = IVLCmd::nondet(&guarded_case, &not_guarded_case);
             }
-
-            Ok(command)
+        
+            Ok(nested_command)
         }
+        
+        
         CmdKind::Loop {
             invariants,
             variant,
