@@ -1,17 +1,14 @@
 pub mod ivl;
 mod ivl_ext;
 use crate::slang::ast::Case;
-use itertools::fold;
 use ivl::{IVLCmd, IVLCmdKind};
-use regex::NoExpand;
 use slang::ast::{
     Cases, Cmd, CmdKind, Expr, ExprKind, Ident, Method, Name, Op, Quantifier, Range, Type, Var,
 };
-use slang::Span;
 use slang_ui::prelude::*;
 use std::borrow::Borrow;
 // use std::collections::btree_map::Range;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 use std::fs::File;
 use std::io::Write;
 use std::iter;
