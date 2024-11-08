@@ -340,18 +340,16 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method_initial: &Method) -> Result<IVLCmd> {
         // }
         CmdKind::Return { expr } => {
             let re_ensure = ensures_expressions2(&method_initial);
-            //first of all check  if the method is returning something
-            //if no ignore the return cmdKind
+        
+            // Check if the method has a return expression; if not, ignore `Return`
             match expr {
                 Some(expr_value) => {
-                    //here i should find if there are ensures in the specifications
-                    //if yes then i should assert it else i should nop()
+                    // Check if there are `ensures` specifications to validate
                     if re_ensure.1 {
-                        //The ivl that i want to return at the end
+                        // Start with an initial IVLCmd for the assertions
                         let mut ivlcmd;
-
-                        //if we have only one ensure we are returning the assert of it
-                        //and subs the result by expr_value
+        
+                        // If there is only one `ensure`, handle it directly
                         if re_ensure.0.len() == 1 {
                             let x = &re_ensure.0[0].span;
                             ivlcmd = IVLCmd::assert(
@@ -359,38 +357,40 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method_initial: &Method) -> Result<IVLCmd> {
                                 "Ensures might fail!",
                             );
                         } else {
-                            //if we have more than one ensure we are returning them as seq of the assert od each
-                            //and subs the result by expr_value
-                            //we are using the with_span because subst_result is making changes on the span
+                            // If multiple `ensures`, sequence the assertions
                             let s = &re_ensure.0[0].span;
-                            //i am taking the first item in the vec as first ivl and then iterating on the rest
-                            //inorder to connect them using seq
                             ivlcmd = IVLCmd::assert(
                                 &re_ensure.0[0].subst_result(expr_value).with_span(s.clone()),
                                 "Ensures might fail!",
                             );
-
+        
+                            // Chain additional ensures with `seq`
                             for expr in &re_ensure.0[1..] {
-                                // Slice starting from the second item
                                 let x = &expr.span;
                                 let ivl = IVLCmd::assert(
                                     &expr.subst_result(expr_value).with_span(x.clone()),
                                     "Ensures might fail!",
                                 );
-                                ivlcmd = ivlcmd.seq(&ivl)
+                                ivlcmd = ivlcmd.seq(&ivl);
                             }
                         }
-
+        
+                        // Add assume(false) to prevent any further execution
+                        ivlcmd = ivlcmd.seq(&IVLCmd::assume(&Expr::bool(false)));
+        
                         Ok(ivlcmd)
                     } else {
-                        Ok(IVLCmd::nop())
+                        // No ensures to validate, just end with assume(false)
+                        Ok(IVLCmd::assume(&Expr::bool(false)))
                     }
                 }
-                None => Ok(IVLCmd::nop()),
+                None => {
+                    // If there is no return expression, end with assume(false)
+                    Ok(IVLCmd::assume(&Expr::bool(false)))
+                }
             }
-
-            // Ok(IVLCmd::nop())
         }
+        
 
         CmdKind::VarDefinition {
             name,
