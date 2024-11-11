@@ -134,7 +134,11 @@ fn check_cmd_for_return(cmd: &Cmd) -> bool {
         }
 
         // For match statements, check if all branches contain a return
-        CmdKind::Match { body } => body.cases.iter().all(|case| check_cmd_for_return(&case.cmd)),
+        CmdKind::Match { body } => {
+            let all_cases_return = body.cases.iter().all(|case| check_cmd_for_return(&case.cmd));
+            let true_case = body.cases.iter().any(|case| has_true(&case.condition));
+            all_cases_return && true_case
+        }
 
         // For loop statements, check if the loop body contains a return
         CmdKind::Loop { body, .. } => body.cases.iter().any(|case| check_cmd_for_return(&case.cmd)),
@@ -241,6 +245,22 @@ fn collect_variables_from_assignments_in_loop_body(com: Cmd) -> Vec<(Name, Type)
             variables.append(&mut variables1);
             variables.append(&mut variables2);
         }
+        CmdKind::Match { body } => {
+            for case in &body.cases {
+                let mut case_variables = collect_variables_from_assignments_in_loop_body(case.cmd.clone());
+                variables.append(&mut case_variables);
+            }
+        }
+        CmdKind::Loop { body, .. } => {
+            for case in &body.cases {
+                let mut case_variables = collect_variables_from_assignments_in_loop_body(case.cmd.clone());
+                variables.append(&mut case_variables);
+            }
+        }
+        CmdKind::For { body, .. } => {
+            let mut body_variables = collect_variables_from_assignments_in_loop_body(*body.cmd.clone());
+            variables.append(&mut body_variables);
+        }
         _ => todo!("Not supported (yet)."),
     }
     variables
@@ -292,6 +312,15 @@ fn has_return(cmd: &Cmd) -> bool {
     }
 }
 
+// Related to encoding of match statements
+// Checks if one of the guards in the match statement is true
+fn has_true(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Bool(true) => true,
+        _ => false,
+    }
+}
+
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
 // a single assertion)
 fn cmd_to_ivlcmd(cmd: &Cmd, method_initial: &Method) -> Result<IVLCmd> {
@@ -316,28 +345,6 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method_initial: &Method) -> Result<IVLCmd> {
             &cmd_to_ivlcmd(command2, &method_initial)?,
         )),
         CmdKind::Assignment { name, expr } => Ok(IVLCmd::assign(name, expr)),
-        // CmdKind::Loop {
-        //     invariants,
-        //     variant,
-        //     body,
-        // } => {
-        //     //first we need to do
-        //     // assert I ;
-        //     //  havoc x;
-        //     //  assume I
-        //     let invariant_expr = invariants_expression(invariants);
-        //     //I do not know how to make this flow in the cmds below
-        //     let assert_invariant = IVLCmd::assert(&invariant_expr, "invariant");
-        //     //assume invariant
-        //     let assume_invariant = IVLCmd::assume(&invariant_expr);
-
-        //     let modified_variables = collect_var_definitions(&body);
-        //     //The above variables should be connected in some way
-
-        //     // the cases of the loop should be handled as match
-
-        //     Ok(IVLCmd::nop())
-        // }
         CmdKind::Return { expr } => {
             let re_ensure = ensures_expressions2(&method_initial);
         
@@ -417,9 +424,11 @@ fn cmd_to_ivlcmd(cmd: &Cmd, method_initial: &Method) -> Result<IVLCmd> {
         CmdKind::Match { body } => {
             // Check if all cases contain a return
             let all_cases_return = body.cases.iter().all(|case| has_return(&case.cmd));
+
+            let true_case = body.cases.iter().any(|case| has_true(&case.condition));
         
             // Initialize the "base case" as either `assume(false)` or `nop`
-            let mut nested_command = if all_cases_return {
+            let mut nested_command = if all_cases_return && true_case {
                 IVLCmd::seq(&IVLCmd::assume(&Expr::bool(false)), &cmd_to_ivlcmd(&Cmd::new(CmdKind::Return { expr: Some(Expr::num(0)) }), method_initial)?)
                  // Terminate if all cases have return
             } else {
